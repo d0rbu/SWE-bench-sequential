@@ -7,9 +7,9 @@ import os
 from typing import Optional
 
 from swebench.collect.utils import (
+    Repo,
     extract_patches,
     extract_problem_statement_and_hints,
-    Repo,
 )
 
 logging.basicConfig(
@@ -134,9 +134,11 @@ def main(pr_file: str, output: str, token: Optional[str] = None):
                     completed += 1
                     if has_test_patch(pr):
                         with_tests += 1
-    logger.info(
-        f"Will skip {len(seen_prs)} pull requests that have already been inspected"
-    )
+
+    if len(seen_prs) > 0:
+        logger.info(
+            f"Will skip {len(seen_prs)} pull requests that have already been inspected"
+        )
 
     # Write to .all file for all PRs
     write_mode_all = "w" if not os.path.exists(all_output) else "a"
