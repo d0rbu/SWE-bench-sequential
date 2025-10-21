@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_instance(repo: Repo, pull: dict) -> dict:
+def create_instance(repo: Repo, pull: dict, chain_id: str = None, chain_position: int = None) -> dict:
     """
     Create a single task instance from a pull request, where task instance is:
 
@@ -28,11 +28,15 @@ def create_instance(repo: Repo, pull: dict) -> dict:
         base_commit (str): SHA of the base commit PR is based on,
         patch (str): reference solution as .patch (apply to base commit),
         test_patch (str): test suite as .patch (apply to base commit),
+        chain_id (str, optional): ID of the chain this instance belongs to,
+        chain_position (int, optional): Position of this instance in the chain,
+        is_chain_member (bool): Whether this instance is part of a chain,
     }
     """
     patch, test_patch = extract_patches(pull, repo)
     problem_statement, hints = extract_problem_statement_and_hints(pull, repo)
-    return {
+    
+    instance = {
         "repo": repo.repo.full_name,
         "pull_number": pull["number"],
         "instance_id": (repo.repo.full_name + "-" + str(pull["number"])).replace(
@@ -45,7 +49,13 @@ def create_instance(repo: Repo, pull: dict) -> dict:
         "problem_statement": problem_statement,
         "hints_text": hints,
         "created_at": pull["created_at"],
+        # Chain-related fields (optional, for backward compatibility)
+        "chain_id": chain_id,
+        "chain_position": chain_position,
+        "is_chain_member": chain_id is not None,
     }
+    
+    return instance
 
 
 def is_valid_pull(pull: dict) -> bool:
