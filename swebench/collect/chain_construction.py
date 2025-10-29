@@ -12,8 +12,9 @@ import hashlib
 import json
 import logging
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -171,7 +172,13 @@ class Chain:
             if instance.get("pull_number") is not None
         ]
         if len(pr_numbers) != len(set(pr_numbers)):
-            errors.append("Chain contains duplicate PR numbers")
+            # Use Counter to find duplicates and their counts
+            pr_counts = Counter(pr_numbers)
+            duplicates = {pr: count for pr, count in pr_counts.items() if count > 1}
+            errors.append(
+                f"Chain contains duplicate PR numbers: {duplicates} "
+                f"(PR number: count)"
+            )
         
         # Check that all instances have required fields
         required_fields = ["repo", "pull_number", "instance_id"]
@@ -331,28 +338,6 @@ class Chain:
         return f"Chain(id='{self.chain_id}', length={len(self.task_instances)})"
 
 
-def create_chain_from_instances(
-    task_instances: List[Dict[str, Any]],
-    sort_by_date: bool = True
-) -> Chain:
-    """
-    Create a chain from a list of task instances.
-    
-    Args:
-        task_instances: List of task instance dictionaries
-        sort_by_date: Whether to sort instances by creation date
-        
-    Returns:
-        Chain object
-    """
-    chain = Chain(task_instances)
-    
-    if sort_by_date:
-        chain.sort_by_date()
-    
-    return chain
-
-
 def create_single_instance_chain(task_instance: Dict[str, Any]) -> Chain:
     """
     Create a chain containing a single task instance.
@@ -367,34 +352,6 @@ def create_single_instance_chain(task_instance: Dict[str, Any]) -> Chain:
         Chain object containing the single instance
     """
     return Chain([task_instance])
-
-
-def extend_task_instance_for_chain(
-    task_instance: Dict[str, Any],
-    chain_id: Optional[str] = None,
-    chain_position: Optional[int] = None
-) -> Dict[str, Any]:
-    """
-    Extend a task instance with chain-related fields.
-    
-    Args:
-        task_instance: Original task instance dictionary
-        chain_id: ID of the chain this instance belongs to
-        chain_position: Position of this instance in the chain (0-based)
-        
-    Returns:
-        Extended task instance dictionary
-    """
-    extended_instance = task_instance.copy()
-    
-    # Add chain-related fields
-    extended_instance.update({
-        "chain_id": chain_id,
-        "chain_position": chain_position,
-        "is_chain_member": chain_id is not None
-    })
-    
-    return extended_instance
 
 
 def validate_chain_id(chain_id: str) -> bool:
@@ -474,8 +431,6 @@ def _build_temporal_chains(
     Returns:
         List of Chain objects
     """
-    from datetime import datetime, timedelta
-    
     # Sort instances by creation date
     sorted_instances = sorted(
         task_instances,

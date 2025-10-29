@@ -14,9 +14,7 @@ from datetime import datetime, timedelta
 
 from swebench.collect.chain_construction import (
     Chain,
-    create_chain_from_instances,
     create_single_instance_chain,
-    extend_task_instance_for_chain,
     validate_chain_id,
     build_chains_from_repository_data,
     save_chains_to_jsonl,
@@ -91,7 +89,7 @@ class TestChain:
             }
         ]
         
-        with pytest.raises(ValueError, match="duplicate PR numbers"):
+        with pytest.raises(ValueError, match="duplicate PR numbers.*1.*2"):
             Chain(task_instances)
     
     def test_chain_validation_multiple_repos(self):
@@ -275,42 +273,6 @@ class TestChainUtilities:
         assert len(chain) == 1
         assert chain[0] == task_instance
         assert chain.metadata["validation_status"] == "passed"
-    
-    def test_extend_task_instance_for_chain(self):
-        """Test extending task instance with chain fields."""
-        task_instance = {
-            "repo": "test/repo",
-            "pull_number": 1,
-            "instance_id": "test__repo-1"
-        }
-        
-        extended = extend_task_instance_for_chain(
-            task_instance,
-            chain_id="test__repo__chain-12345678",
-            chain_position=0
-        )
-        
-        assert extended["chain_id"] == "test__repo__chain-12345678"
-        assert extended["chain_position"] == 0
-        assert extended["is_chain_member"] is True
-        
-        # Original fields should be preserved
-        assert extended["repo"] == "test/repo"
-        assert extended["pull_number"] == 1
-    
-    def test_extend_task_instance_no_chain(self):
-        """Test extending task instance without chain membership."""
-        task_instance = {
-            "repo": "test/repo",
-            "pull_number": 1,
-            "instance_id": "test__repo-1"
-        }
-        
-        extended = extend_task_instance_for_chain(task_instance)
-        
-        assert extended["chain_id"] is None
-        assert extended["chain_position"] is None
-        assert extended["is_chain_member"] is False
     
     def test_validate_chain_id_valid(self):
         """Test chain ID validation with valid IDs."""
@@ -518,8 +480,9 @@ class TestBackwardCompatibility:
         assert "patch" in chain[0]
         assert "problem_statement" in chain[0]
     
-    def test_extended_task_instance_backward_compatibility(self):
-        """Test that extended task instances maintain backward compatibility."""
+    def test_task_instance_format_backward_compatibility(self):
+        """Test that task instances work with or without chain fields."""
+        # Test without chain fields
         original_instance = {
             "repo": "test/repo",
             "pull_number": 1,
@@ -528,22 +491,19 @@ class TestBackwardCompatibility:
             "problem_statement": "test problem"
         }
         
-        # Extend with chain fields
-        extended = extend_task_instance_for_chain(
-            original_instance,
-            chain_id="test__repo__chain-12345678",
-            chain_position=0
-        )
+        # Should work with existing format
+        chain = create_single_instance_chain(original_instance)
+        assert len(chain) == 1
         
-        # All original fields should be preserved
-        for key, value in original_instance.items():
-            assert extended[key] == value
+        # Test with chain fields (as created by build_dataset.py)
+        instance_with_chain = original_instance.copy()
+        instance_with_chain.update({
+            "chain_id": None,
+            "chain_position": None,
+            "is_chain_member": False
+        })
         
-        # New fields should be added
-        assert "chain_id" in extended
-        assert "chain_position" in extended
-        assert "is_chain_member" in extended
-        
-        # Should work without chain fields too
-        non_chain_extended = extend_task_instance_for_chain(original_instance)
-        assert non_chain_extended["is_chain_member"] is False
+        # Should also work
+        chain2 = create_single_instance_chain(instance_with_chain)
+        assert len(chain2) == 1
+        assert chain2.metadata["validation_status"] == "passed"
