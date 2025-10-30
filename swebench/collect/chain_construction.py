@@ -171,10 +171,10 @@ class Chain:
             instance.get("pull_number") for instance in self.task_instances
             if instance.get("pull_number") is not None
         ]
-        if len(pr_numbers) != len(set(pr_numbers)):
-            # Use Counter to find duplicates and their counts
-            pr_counts = Counter(pr_numbers)
-            duplicates = {pr: count for pr, count in pr_counts.items() if count > 1}
+        # Use Counter to find duplicates and their counts
+        pr_counts = Counter(pr_numbers)
+        duplicates = {pr: count for pr, count in pr_counts.items() if count > 1}
+        if duplicates:
             errors.append(
                 f"Chain contains duplicate PR numbers: {duplicates} "
                 f"(PR number: count)"
