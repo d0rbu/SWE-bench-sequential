@@ -51,30 +51,31 @@ class PRNode:
 class DependencyDAG:
     """Directed Acyclic Graph of PR dependencies."""
     nodes: Dict[int, PRNode] = field(default_factory=dict)
-    edges: Dict[int, Set[int]] = field(default_factory=dict)
+    edges: Dict[int, Dict[int, float]] = field(default_factory=dict)  # pr -> {dependency -> weight}
     
     def add_node(self, node: PRNode) -> None:
         """Add a PR node to the DAG."""
         self.nodes[node.pr_number] = node
         if node.pr_number not in self.edges:
-            self.edges[node.pr_number] = set()
+            self.edges[node.pr_number] = {}
     
     def add_edge(self, from_pr: int, to_pr: int, weight: float) -> None:
-        """Add a dependency edge."""
+        """Add a dependency edge with weight."""
         if from_pr not in self.edges:
-            self.edges[from_pr] = set()
-        self.edges[from_pr].add(to_pr)
+            self.edges[from_pr] = {}
+        self.edges[from_pr][to_pr] = weight
+        # Update the node's dependencies dict as well for backward compatibility
         self.nodes[from_pr].dependencies[to_pr] = weight
     
     def get_dependencies(self, pr_number: int) -> List[int]:
         """Get PRs that this PR depends on."""
-        return list(self.edges.get(pr_number, set()))
+        return list(self.edges.get(pr_number, {}).keys())
     
     def get_topological_order(self) -> List[int]:
         """Return PRs in topological order (dependencies before dependents)."""
         in_degree = {pr: 0 for pr in self.nodes}
         for deps in self.edges.values():
-            for dep in deps:
+            for dep in deps.keys():
                 in_degree[dep] += 1
         
         queue = [pr for pr, deg in in_degree.items() if deg == 0]
@@ -83,7 +84,7 @@ class DependencyDAG:
         while queue:
             pr = queue.pop(0)
             result.append(pr)
-            for dep in self.edges.get(pr, []):
+            for dep in self.edges.get(pr, {}).keys():
                 in_degree[dep] -= 1
                 if in_degree[dep] == 0:
                     queue.append(dep)

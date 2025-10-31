@@ -268,11 +268,20 @@ class Chain:
         Returns:
             Task instance dictionary if found, None otherwise
         """
-        return next(
-            (instance for instance in self.task_instances 
-             if instance.get("instance_id") == instance_id),
-            None
+        matching_instances = [
+            instance for instance in self.task_instances 
+            if instance.get("instance_id") == instance_id
+        ]
+        
+        if len(matching_instances) == 0:
+            return None
+        
+        assert len(matching_instances) == 1, (
+            f"Expected exactly 1 instance with ID '{instance_id}', "
+            f"found {len(matching_instances)}"
         )
+        
+        return matching_instances[0]
     
     def sort_by_date(self, reverse: bool = False) -> None:
         """
