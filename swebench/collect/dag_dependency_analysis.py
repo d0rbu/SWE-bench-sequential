@@ -20,14 +20,16 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-try:
-    import unidiff
-except ImportError:
-    unidiff = None
+import unidiff
 
 logger = logging.getLogger(__name__)
+
+
+# Type alias for PR sampler function
+# Takes: (leaf_prs: List[int], dag: DependencyDAG, covered_prs: Set[int]) -> int
+PRSampler = Callable[[List[int], "DependencyDAG", Set[int]], int]
 
 
 @dataclass
@@ -99,22 +101,22 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, List[int
     
     result = defaultdict(list)
     
-    if unidiff:
-        try:
-            patch_set = unidiff.PatchSet(patch_str)
-            for patched_file in patch_set:
-                file_path = patched_file.path
-                for hunk in patched_file:
-                    for line in hunk:
-                        # Only removed lines (is_removed = True)
-                        # Modified lines don't exist in unidiff - they're remove+add
-                        if line.is_removed and line.source_line_no:
-                            result[file_path].append(line.source_line_no)
-            return dict(result)
-        except Exception as e:
-            logger.warning(f"Failed to parse patch with unidiff: {e}")
-    
+    try:
+        patch_set = unidiff.PatchSet(patch_str)
+        for patched_file in patch_set:
+            file_path = patched_file.path
+            for hunk in patched_file:
+                for line in hunk:
+                    # Only removed lines (is_removed = True)
+                    # Modified lines don't exist in unidiff - they're remove+add
+                    if line.is_removed and line.source_line_no:
+                        result[file_path].append(line.source_line_no)
+        return dict(result)
+    except Exception as e:
+        logger.warning(f"Failed to parse patch with unidiff: {e}, falling back to manual parsing")
+        
     # Fallback manual parsing
+    result.clear()
     current_file = None
     source_line = 1
     
@@ -146,14 +148,13 @@ def extract_modified_files(patch_str: str) -> Set[str]:
     
     files = set()
     
-    if unidiff:
-        try:
-            patch_set = unidiff.PatchSet(patch_str)
-            for patched_file in patch_set:
-                files.add(patched_file.path)
-            return files
-        except Exception as e:
-            logger.warning(f"Failed to parse patch: {e}")
+    try:
+        patch_set = unidiff.PatchSet(patch_str)
+        for patched_file in patch_set:
+            files.add(patched_file.path)
+        return files
+    except Exception as e:
+        logger.warning(f"Failed to parse patch: {e}, falling back to manual parsing")
     
     # Fallback
     for line in patch_str.split('\n'):
@@ -385,12 +386,38 @@ def build_dependency_dag(
     return dag
 
 
+def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_prs: Set[int]) -> int:
+    """
+    Sample PR that maximizes file coverage diversity.
+    
+    Picks the PR that touches the most files not yet covered by selected chains.
+    """
+    # Track which files have been covered
+    covered_files = set()
+    for pr in covered_prs:
+        if pr in dag.nodes:
+            covered_files.update(dag.nodes[pr].modified_files)
+    
+    # Pick PR with most uncovered files
+    best_pr = max(
+        leaf_prs,
+        key=lambda pr: len(dag.nodes[pr].modified_files - covered_files)
+    )
+    return best_pr
+
+
+def random_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_prs: Set[int]) -> int:
+    """Random PR selection for baseline comparison."""
+    import random
+    return random.choice(leaf_prs)
+
+
 def sample_chains_from_dag(
     dag: DependencyDAG,
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
-    diversity_strategy: str = 'file_coverage'
+    sampler: Optional[PRSampler] = None
 ) -> List[List[Dict[str, Any]]]:
     """
     Sample diverse chains from the dependency DAG.
@@ -400,14 +427,18 @@ def sample_chains_from_dag(
         num_chains: Number of chains to sample
         min_chain_length: Minimum chain length
         max_chain_length: Maximum chain length
-        diversity_strategy: Strategy for diversity ('file_coverage', 'pr_coverage', 'random')
+        sampler: Function to select starting PR for each chain.
+                 Takes (leaf_prs, dag, covered_prs) and returns selected PR number.
+                 Defaults to file_coverage_sampler if None.
         
     Returns:
         List of chains, where each chain is a list of task instances in dependency order
     """
+    if sampler is None:
+        sampler = file_coverage_sampler
+    
     chains = []
     used_prs = set()
-    covered_files = set()
     
     # Get PRs in topological order (dependencies first)
     topo_order = dag.get_topological_order()
@@ -419,17 +450,8 @@ def sample_chains_from_dag(
         if not leaf_prs:
             break
         
-        # Pick a starting PR based on diversity strategy
-        if diversity_strategy == 'file_coverage':
-            # Pick PR that covers most uncovered files
-            best_pr = max(
-                leaf_prs,
-                key=lambda pr: len(dag.nodes[pr].modified_files - covered_files)
-            )
-        else:
-            # Random selection
-            import random
-            best_pr = random.choice(leaf_prs)
+        # Use the injected sampler to pick starting PR
+        best_pr = sampler(leaf_prs, dag, used_prs)
         
         # Build chain by following dependencies
         chain = []
@@ -439,7 +461,6 @@ def sample_chains_from_dag(
             node = dag.nodes[current_pr]
             chain.append(node.task_instance)
             used_prs.add(current_pr)
-            covered_files.update(node.modified_files)
             
             # Follow strongest dependency
             deps = dag.get_dependencies(current_pr)
@@ -457,4 +478,3 @@ def sample_chains_from_dag(
             logger.info(f"Sampled chain: {[inst['pull_number'] for inst in chain]}")
     
     return chains
-

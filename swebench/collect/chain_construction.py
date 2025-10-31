@@ -22,18 +22,17 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from datetime import datetime, timedelta
 from pathlib import Path
 
-try:
-    import unidiff
-except ImportError:
-    unidiff = None
-    logging.warning("unidiff not installed - patch parsing will be limited")
+import unidiff
 
 # Import DAG-based dependency analysis
 from swebench.collect.dag_dependency_analysis import (
     build_dependency_dag,
     sample_chains_from_dag,
+    file_coverage_sampler,
+    random_sampler,
     DependencyDAG,
     PRNode,
+    PRSampler,
 )
 
 logging.basicConfig(
@@ -409,7 +408,7 @@ def build_chains_from_repository_data(
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
-    diversity_strategy: str = 'file_coverage'
+    sampler: Optional[PRSampler] = None
 ) -> List[Chain]:
     """
     Build chains from task instances using DAG-based dependency analysis.
@@ -428,7 +427,8 @@ def build_chains_from_repository_data(
         num_chains: Number of chains to sample from DAG
         min_chain_length: Minimum chain length
         max_chain_length: Maximum chain length
-        diversity_strategy: Strategy for sampling diversity
+        sampler: Function to select starting PR for chains. Takes (leaf_prs, dag, covered_prs)
+                 and returns selected PR number. Defaults to file_coverage_sampler if None.
         
     Returns:
         List of Chain objects sampled from the dependency DAG
@@ -455,7 +455,7 @@ def build_chains_from_repository_data(
         num_chains=num_chains,
         min_chain_length=min_chain_length,
         max_chain_length=max_chain_length,
-        diversity_strategy=diversity_strategy
+        sampler=sampler
     )
     
     # Convert to Chain objects
