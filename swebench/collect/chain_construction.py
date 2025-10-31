@@ -1,9 +1,10 @@
 """
 Chain construction module for SWE-bench-sequential.
 
-This module provides the foundational chain construction functionality to handle
-multi-turn chain logic, extending the existing single-turn task instance format
-to support sequences of related PRs while maintaining backward compatibility.
+This module provides DAG-based dependency analysis to construct chains of related PRs.
+Dependencies are determined through git blame analysis on modified/deleted lines,
+temporal proximity, issue relationships, and file overlap. Chains are sampled from
+the resulting DAG to maximize diversity.
 """
 
 from __future__ import annotations
@@ -11,10 +12,29 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
+import subprocess
 import time
-from collections import Counter
-from typing import Any, Dict, List, Optional, Union
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from datetime import datetime, timedelta
+from pathlib import Path
+
+try:
+    import unidiff
+except ImportError:
+    unidiff = None
+    logging.warning("unidiff not installed - patch parsing will be limited")
+
+# Import DAG-based dependency analysis
+from swebench.collect.dag_dependency_analysis import (
+    build_dependency_dag,
+    sample_chains_from_dag,
+    DependencyDAG,
+    PRNode,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -383,162 +403,71 @@ def validate_chain_id(chain_id: str) -> bool:
 
 def build_chains_from_repository_data(
     task_instances: List[Dict[str, Any]],
-    grouping_strategy: str = "temporal",
-    max_chain_length: int = 10,
-    time_window_days: int = 30
+    repo_path: Optional[str] = None,
+    time_window_months: int = 6,
+    blame_threshold: float = 0.1,
+    num_chains: int = 10,
+    min_chain_length: int = 2,
+    max_chain_length: int = 5,
+    diversity_strategy: str = 'file_coverage'
 ) -> List[Chain]:
     """
-    Build chains from a collection of task instances using various grouping strategies.
+    Build chains from task instances using DAG-based dependency analysis.
+    
+    This performs sophisticated dependency detection through:
+    - Git blame analysis on modified/deleted lines
+    - Temporal proximity filtering
+    - Issue relationship matching  
+    - File overlap detection
     
     Args:
         task_instances: List of task instance dictionaries
-        grouping_strategy: Strategy for grouping instances ("temporal", "issue_based")
-        max_chain_length: Maximum number of instances per chain
-        time_window_days: Time window for temporal grouping (in days)
+        repo_path: Path to git repository for blame analysis (optional)
+        time_window_months: Maximum age difference for dependencies (default: 6)
+        blame_threshold: Minimum blame % for dependency (default: 0.1 = 10%)
+        num_chains: Number of chains to sample from DAG
+        min_chain_length: Minimum chain length
+        max_chain_length: Maximum chain length
+        diversity_strategy: Strategy for sampling diversity
         
     Returns:
-        List of Chain objects
+        List of Chain objects sampled from the dependency DAG
     """
     if not task_instances:
         return []
     
-    chains = []
+    logger.info(f"Building dependency DAG from {len(task_instances)} task instances")
     
-    if grouping_strategy == "temporal":
-        chains = _build_temporal_chains(task_instances, max_chain_length, time_window_days)
-    elif grouping_strategy == "issue_based":
-        chains = _build_issue_based_chains(task_instances, max_chain_length)
-    else:
-        # Default: treat each instance as a single-item chain
-        chains = [create_single_instance_chain(instance) for instance in task_instances]
-    
-    return chains
-
-
-def _build_temporal_chains(
-    task_instances: List[Dict[str, Any]],
-    max_chain_length: int,
-    time_window_days: int
-) -> List[Chain]:
-    """
-    Build chains based on temporal proximity of PRs.
-    
-    Args:
-        task_instances: List of task instance dictionaries
-        max_chain_length: Maximum number of instances per chain
-        time_window_days: Time window for grouping (in days)
-        
-    Returns:
-        List of Chain objects
-    """
-    # Sort instances by creation date
-    sorted_instances = sorted(
+    # Build the dependency DAG
+    dag = build_dependency_dag(
         task_instances,
-        key=lambda x: x.get("created_at", "")
+        repo_path=repo_path or "",
+        time_window_months=time_window_months,
+        blame_threshold=blame_threshold
     )
     
-    chains = []
-    current_chain_instances = []
+    logger.info(f"DAG built with {len(dag.nodes)} nodes and "
+                f"{sum(len(deps) for deps in dag.edges.values())} edges")
     
-    for instance in sorted_instances:
-        created_at_str = instance.get("created_at", "")
-        if not created_at_str:
-            # If no creation date, treat as single instance chain
-            if current_chain_instances:
-                chains.append(Chain(current_chain_instances))
-                current_chain_instances = []
-            chains.append(create_single_instance_chain(instance))
-            continue
-        
+    # Sample diverse chains from the DAG
+    chain_instances = sample_chains_from_dag(
+        dag,
+        num_chains=num_chains,
+        min_chain_length=min_chain_length,
+        max_chain_length=max_chain_length,
+        diversity_strategy=diversity_strategy
+    )
+    
+    # Convert to Chain objects
+    chains = []
+    for instances in chain_instances:
         try:
-            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            # If date parsing fails, treat as single instance chain
-            if current_chain_instances:
-                chains.append(Chain(current_chain_instances))
-                current_chain_instances = []
-            chains.append(create_single_instance_chain(instance))
-            continue
-        
-        # Check if this instance should be added to current chain
-        should_add_to_current = False
-        
-        if current_chain_instances:
-            last_instance = current_chain_instances[-1]
-            last_created_str = last_instance.get("created_at", "")
-            
-            try:
-                last_created = datetime.fromisoformat(last_created_str.replace("Z", "+00:00"))
-                time_diff = created_at - last_created
-                
-                # Add to current chain if within time window and under max length
-                if (time_diff <= timedelta(days=time_window_days) and 
-                    len(current_chain_instances) < max_chain_length):
-                    should_add_to_current = True
-            except (ValueError, AttributeError):
-                pass
-        
-        if should_add_to_current:
-            current_chain_instances.append(instance)
-        else:
-            # Start new chain
-            if current_chain_instances:
-                chains.append(Chain(current_chain_instances))
-            current_chain_instances = [instance]
+            chain = Chain(instances)
+            chains.append(chain)
+        except ValueError as e:
+            logger.warning(f"Failed to create chain: {e}")
     
-    # Add final chain if exists
-    if current_chain_instances:
-        chains.append(Chain(current_chain_instances))
-    
-    return chains
-
-
-def _build_issue_based_chains(
-    task_instances: List[Dict[str, Any]],
-    max_chain_length: int
-) -> List[Chain]:
-    """
-    Build chains based on shared issues between PRs.
-    
-    Args:
-        task_instances: List of task instance dictionaries
-        max_chain_length: Maximum number of instances per chain
-        
-    Returns:
-        List of Chain objects
-    """
-    # Group instances by shared issues
-    issue_groups = {}
-    
-    for instance in task_instances:
-        issue_numbers = instance.get("issue_numbers", [])
-        if not issue_numbers:
-            # No issues, treat as single instance chain
-            continue
-        
-        # Use first issue as primary grouping key
-        primary_issue = str(issue_numbers[0])
-        if primary_issue not in issue_groups:
-            issue_groups[primary_issue] = []
-        issue_groups[primary_issue].append(instance)
-    
-    chains = []
-    
-    # Create chains from issue groups
-    for issue_num, instances in issue_groups.items():
-        # Sort by creation date
-        instances.sort(key=lambda x: x.get("created_at", ""))
-        
-        # Split into chains if too long
-        while instances:
-            chain_instances = instances[:max_chain_length]
-            instances = instances[max_chain_length:]
-            
-            if len(chain_instances) == 1:
-                chains.append(create_single_instance_chain(chain_instances[0]))
-            else:
-                chains.append(Chain(chain_instances))
-    
+    logger.info(f"Sampled {len(chains)} diverse chains from DAG")
     return chains
 
 
@@ -580,15 +509,17 @@ def load_chains_from_jsonl(input_file: str) -> List[Chain]:
 def convert_single_instances_to_chains(
     input_file: str,
     output_file: str,
-    grouping_strategy: str = "temporal"
+    repo_path: Optional[str] = None,
+    **kwargs
 ) -> None:
     """
-    Convert a JSONL file of single task instances to chains.
+    Convert a JSONL file of single task instances to chains using DAG-based analysis.
     
     Args:
         input_file: Path to input JSONL file with single instances
         output_file: Path to output JSONL file with chains
-        grouping_strategy: Strategy for grouping instances into chains
+        repo_path: Path to git repository for blame analysis (optional)
+        **kwargs: Additional arguments to pass to build_chains_from_repository_data
     """
     # Load single instances
     task_instances = []
@@ -600,8 +531,12 @@ def convert_single_instances_to_chains(
                 instance = json.loads(line)
                 task_instances.append(instance)
     
-    # Build chains
-    chains = build_chains_from_repository_data(task_instances, grouping_strategy)
+    # Build chains using DAG-based analysis
+    chains = build_chains_from_repository_data(
+        task_instances,
+        repo_path=repo_path,
+        **kwargs
+    )
     
     # Save chains
     save_chains_to_jsonl(chains, output_file)
