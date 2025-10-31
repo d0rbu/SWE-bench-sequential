@@ -18,6 +18,7 @@ import subprocess
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,6 +69,15 @@ class Chain:
         self.metadata = metadata or {}
         self.created_at = datetime.utcnow().isoformat()
         
+        # Validate that all instances are from the same repository
+        if self.task_instances:
+            repos = set(instance.get("repo") for instance in self.task_instances)
+            if len(repos) > 1:
+                raise ValueError(
+                    f"All task instances must be from the same repository. "
+                    f"Found multiple repositories: {repos}"
+                )
+        
         # Generate chain ID if not provided
         if chain_id is None:
             self.chain_id = self._generate_chain_id()
@@ -114,6 +124,10 @@ class Chain:
     
     def _update_metadata(self) -> None:
         """Update chain metadata with computed values."""
+        # Extract PR numbers, filtering out None values
+        raw_pr_numbers = [instance.get("pull_number") for instance in self.task_instances]
+        pr_numbers = [pr_num for pr_num in raw_pr_numbers if pr_num is not None]
+        
         self.metadata.update({
             "length": len(self.task_instances),
             "created_at": self.created_at,
@@ -121,9 +135,7 @@ class Chain:
             "repositories": list(set(
                 instance.get("repo", "") for instance in self.task_instances
             )),
-            "pull_numbers": [
-                instance.get("pull_number") for instance in self.task_instances
-            ],
+            "pull_numbers": pr_numbers,
             "date_range": self._get_date_range(),
             "dependencies": self._extract_dependencies()
         })
@@ -138,10 +150,9 @@ class Chain:
         if not self.task_instances:
             return {"start": None, "end": None}
         
-        dates = [
-            instance.get("created_at") for instance in self.task_instances
-            if instance.get("created_at")
-        ]
+        # Extract dates, filtering out None values
+        raw_dates = [instance.get("created_at") for instance in self.task_instances]
+        dates = [date for date in raw_dates if date is not None]
         
         if not dates:
             return {"start": None, "end": None}
@@ -159,15 +170,10 @@ class Chain:
         dependencies = []
         
         # Simple temporal dependencies (each PR depends on the previous one)
-        for i in range(1, len(self.task_instances)):
-            prev_instance = self.task_instances[i-1]
-            curr_instance = self.task_instances[i]
-            
+        for prev_instance, curr_instance in pairwise(self.task_instances):
             dependencies.append({
-                "type": "temporal",
                 "from_pr": prev_instance.get("pull_number"),
                 "to_pr": curr_instance.get("pull_number"),
-                "relationship": "precedes"
             })
         
         return dependencies
@@ -262,10 +268,11 @@ class Chain:
         Returns:
             Task instance dictionary if found, None otherwise
         """
-        for instance in self.task_instances:
-            if instance.get("instance_id") == instance_id:
-                return instance
-        return None
+        return next(
+            (instance for instance in self.task_instances 
+             if instance.get("instance_id") == instance_id),
+            None
+        )
     
     def sort_by_date(self, reverse: bool = False) -> None:
         """
@@ -462,13 +469,7 @@ def build_chains_from_repository_data(
     )
     
     # Convert to Chain objects
-    chains = []
-    for instances in chain_instances:
-        try:
-            chain = Chain(instances)
-            chains.append(chain)
-        except ValueError as e:
-            logger.warning(f"Failed to create chain: {e}")
+    chains = [Chain(instances) for instances in chain_instances]
     
     logger.info(f"Sampled {len(chains)} diverse chains from DAG")
     return chains

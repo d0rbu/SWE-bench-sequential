@@ -392,22 +392,36 @@ def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files
     Sample PR that maximizes file coverage diversity.
     
     Picks the PR that touches the most files not yet covered by selected chains.
+    If there are ties, randomly selects from PRs with maximum uncovered files.
     
     Args:
         leaf_prs: List of PR numbers to sample from
         dag: Dependency DAG containing PR nodes
         covered_files: Set of file paths already covered by previous chains
-        seed: Random seed (unused but kept for interface consistency)
+        seed: Random seed for deterministic tie-breaking
         
     Returns:
         Selected PR number that maximizes uncovered files
     """
-    # Pick PR with most uncovered files
-    best_pr = max(
-        leaf_prs,
-        key=lambda pr: len(dag.nodes[pr].modified_files - covered_files)
-    )
-    return best_pr
+    # Calculate uncovered file counts for all PRs
+    uncovered_counts = [
+        len(dag.nodes[pr].modified_files - covered_files) 
+        for pr in leaf_prs
+    ]
+    
+    # Find maximum uncovered file count
+    max_uncovered = max(uncovered_counts)
+    
+    # Get all PRs with maximum uncovered files
+    best_prs = [
+        pr for pr, count in zip(leaf_prs, uncovered_counts) 
+        if count == max_uncovered
+    ]
+    
+    # Randomly select from best PRs (with optional seed for determinism)
+    if seed is not None:
+        random.seed(seed)
+    return random.choice(best_prs)
 
 
 def random_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str], seed: Optional[int] = None) -> int:
