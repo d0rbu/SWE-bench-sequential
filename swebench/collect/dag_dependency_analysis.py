@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 # Type alias for PR sampler function
-# Takes: (leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str]) -> int
-PRSampler = Callable[[List[int], "DependencyDAG", Set[str]], int]
+# Takes: (leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str], seed: Optional[int]) -> int
+PRSampler = Callable[[List[int], "DependencyDAG", Set[str], Optional[int]], int]
 
 
 @dataclass
@@ -387,7 +387,7 @@ def build_dependency_dag(
     return dag
 
 
-def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str]) -> int:
+def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str], seed: Optional[int] = None) -> int:
     """
     Sample PR that maximizes file coverage diversity.
     
@@ -397,6 +397,7 @@ def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files
         leaf_prs: List of PR numbers to sample from
         dag: Dependency DAG containing PR nodes
         covered_files: Set of file paths already covered by previous chains
+        seed: Random seed (unused but kept for interface consistency)
         
     Returns:
         Selected PR number that maximizes uncovered files
@@ -432,7 +433,8 @@ def sample_chains_from_dag(
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
-    sampler: PRSampler = file_coverage_sampler
+    sampler: PRSampler = file_coverage_sampler,
+    seed: Optional[int] = None
 ) -> List[List[Dict[str, Any]]]:
     """
     Sample diverse chains from the dependency DAG.
@@ -443,8 +445,9 @@ def sample_chains_from_dag(
         min_chain_length: Minimum chain length
         max_chain_length: Maximum chain length
         sampler: Function to select starting PR for each chain.
-                 Takes (leaf_prs, dag, covered_files) and returns selected PR number.
+                 Takes (leaf_prs, dag, covered_files, seed) and returns selected PR number.
                  Defaults to file_coverage_sampler.
+        seed: Random seed for deterministic sampling
         
     Returns:
         List of chains, where each chain is a list of task instances in dependency order
@@ -464,7 +467,7 @@ def sample_chains_from_dag(
             break
         
         # Use the injected sampler to pick starting PR
-        best_pr = sampler(leaf_prs, dag, covered_files)
+        best_pr = sampler(leaf_prs, dag, covered_files, seed)
         
         # Build chain by following dependencies
         chain = []
