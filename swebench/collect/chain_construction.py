@@ -408,7 +408,7 @@ def build_chains_from_repository_data(
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
-    sampler: Optional[PRSampler] = None
+    sampler: PRSampler = file_coverage_sampler
 ) -> List[Chain]:
     """
     Build chains from task instances using DAG-based dependency analysis.
@@ -427,8 +427,8 @@ def build_chains_from_repository_data(
         num_chains: Number of chains to sample from DAG
         min_chain_length: Minimum chain length
         max_chain_length: Maximum chain length
-        sampler: Function to select starting PR for chains. Takes (leaf_prs, dag, covered_prs)
-                 and returns selected PR number. Defaults to file_coverage_sampler if None.
+        sampler: Function to select starting PR for chains. Takes (leaf_prs, dag, covered_files)
+                 and returns selected PR number. Defaults to file_coverage_sampler.
         
     Returns:
         List of Chain objects sampled from the dependency DAG

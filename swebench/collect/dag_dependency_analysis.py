@@ -13,6 +13,7 @@ diverse chains can be sampled.
 
 import logging
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -28,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 # Type alias for PR sampler function
-# Takes: (leaf_prs: List[int], dag: DependencyDAG, covered_prs: Set[int]) -> int
-PRSampler = Callable[[List[int], "DependencyDAG", Set[int]], int]
+# Takes: (leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str]) -> int
+PRSampler = Callable[[List[int], "DependencyDAG", Set[str]], int]
 
 
 @dataclass
@@ -386,18 +387,20 @@ def build_dependency_dag(
     return dag
 
 
-def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_prs: Set[int]) -> int:
+def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str]) -> int:
     """
     Sample PR that maximizes file coverage diversity.
     
     Picks the PR that touches the most files not yet covered by selected chains.
-    """
-    # Track which files have been covered
-    covered_files = set()
-    for pr in covered_prs:
-        if pr in dag.nodes:
-            covered_files.update(dag.nodes[pr].modified_files)
     
+    Args:
+        leaf_prs: List of PR numbers to sample from
+        dag: Dependency DAG containing PR nodes
+        covered_files: Set of file paths already covered by previous chains
+        
+    Returns:
+        Selected PR number that maximizes uncovered files
+    """
     # Pick PR with most uncovered files
     best_pr = max(
         leaf_prs,
@@ -406,9 +409,21 @@ def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_prs: 
     return best_pr
 
 
-def random_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_prs: Set[int]) -> int:
-    """Random PR selection for baseline comparison."""
-    import random
+def random_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str], seed: Optional[int] = None) -> int:
+    """
+    Random PR selection for baseline comparison.
+    
+    Args:
+        leaf_prs: List of PR numbers to sample from
+        dag: Dependency DAG containing PR nodes (unused but kept for interface consistency)
+        covered_files: Set of file paths already covered (unused but kept for interface consistency)
+        seed: Random seed for deterministic sampling
+        
+    Returns:
+        Randomly selected PR number
+    """
+    if seed is not None:
+        random.seed(seed)
     return random.choice(leaf_prs)
 
 
@@ -417,7 +432,7 @@ def sample_chains_from_dag(
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
-    sampler: Optional[PRSampler] = None
+    sampler: PRSampler = file_coverage_sampler
 ) -> List[List[Dict[str, Any]]]:
     """
     Sample diverse chains from the dependency DAG.
@@ -428,17 +443,15 @@ def sample_chains_from_dag(
         min_chain_length: Minimum chain length
         max_chain_length: Maximum chain length
         sampler: Function to select starting PR for each chain.
-                 Takes (leaf_prs, dag, covered_prs) and returns selected PR number.
-                 Defaults to file_coverage_sampler if None.
+                 Takes (leaf_prs, dag, covered_files) and returns selected PR number.
+                 Defaults to file_coverage_sampler.
         
     Returns:
         List of chains, where each chain is a list of task instances in dependency order
     """
-    if sampler is None:
-        sampler = file_coverage_sampler
-    
     chains = []
     used_prs = set()
+    covered_files = set()
     
     # Get PRs in topological order (dependencies first)
     topo_order = dag.get_topological_order()
@@ -451,7 +464,7 @@ def sample_chains_from_dag(
             break
         
         # Use the injected sampler to pick starting PR
-        best_pr = sampler(leaf_prs, dag, used_prs)
+        best_pr = sampler(leaf_prs, dag, covered_files)
         
         # Build chain by following dependencies
         chain = []
@@ -461,6 +474,7 @@ def sample_chains_from_dag(
             node = dag.nodes[current_pr]
             chain.append(node.task_instance)
             used_prs.add(current_pr)
+            covered_files.update(node.modified_files)
             
             # Follow strongest dependency
             deps = dag.get_dependencies(current_pr)
