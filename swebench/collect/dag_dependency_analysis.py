@@ -44,7 +44,6 @@ class PRNode:
     modified_files: Set[str]
     modified_deleted_lines: Dict[str, List[int]]  # file -> line numbers
     task_instance: Dict[str, Any]
-    dependencies: Dict[int, float] = field(default_factory=dict)  # pr_number -> blame %
 
 
 @dataclass
@@ -64,12 +63,14 @@ class DependencyDAG:
         if from_pr not in self.edges:
             self.edges[from_pr] = {}
         self.edges[from_pr][to_pr] = weight
-        # Update the node's dependencies dict as well for backward compatibility
-        self.nodes[from_pr].dependencies[to_pr] = weight
     
     def get_dependencies(self, pr_number: int) -> List[int]:
         """Get PRs that this PR depends on."""
         return list(self.edges.get(pr_number, {}).keys())
+    
+    def get_dependency_weights(self, pr_number: int) -> Dict[int, float]:
+        """Get PRs that this PR depends on with their weights."""
+        return self.edges.get(pr_number, {})
     
     def get_topological_order(self) -> List[int]:
         """Return PRs in topological order (dependencies before dependents)."""
@@ -498,7 +499,8 @@ def sample_chains_from_dag(
             deps = dag.get_dependencies(current_pr)
             if deps:
                 # Sort by weight and pick strongest
-                best_dep = max(deps, key=lambda pr: node.dependencies.get(pr, 0))
+                dep_weights = dag.get_dependency_weights(current_pr)
+                best_dep = max(deps, key=lambda pr: dep_weights.get(pr, 0))
                 current_pr = best_dep
             else:
                 break
