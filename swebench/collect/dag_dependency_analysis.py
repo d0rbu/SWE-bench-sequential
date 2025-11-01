@@ -70,7 +70,8 @@ class DependencyDAG:
     
     def get_dependency_weights(self, pr_number: int) -> Dict[int, float]:
         """Get PRs that this PR depends on with their weights."""
-        return self.edges.get(pr_number, {})
+        assert pr_number in self.edges, f"PR {pr_number} not found in DAG edges"
+        return self.edges[pr_number]
     
     def get_topological_order(self) -> List[int]:
         """Return PRs in topological order (dependencies before dependents)."""
