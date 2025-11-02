@@ -17,7 +17,7 @@ import random
 import re
 import subprocess
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -42,7 +42,7 @@ class PRNode:
     base_commit: str
     issues: Set[str]
     modified_files: Set[str]
-    modified_deleted_lines: Dict[str, List[int]]  # file -> line numbers
+    modified_deleted_lines: Dict[str, Set[int]]  # file -> line numbers
     task_instance: Dict[str, Any]
 
 
@@ -94,7 +94,7 @@ class DependencyDAG:
         return result
 
 
-def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, List[int]]:
+def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]]:
     """
     Parse unified diff to extract modified/deleted line numbers.
     
@@ -103,7 +103,7 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, List[int
     if not patch_str or not patch_str.strip():
         return {}
     
-    result = defaultdict(list)
+    result = defaultdict(set)
     
     try:
         patch_set = unidiff.PatchSet(patch_str)
@@ -114,7 +114,7 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, List[int
                     # Only removed lines (is_removed = True)
                     # Modified lines don't exist in unidiff - they're remove+add
                     if line.is_removed and line.source_line_no:
-                        result[file_path].append(line.source_line_no)
+                        result[file_path].add(line.source_line_no)
         return dict(result)
     except Exception as e:
         logger.warning(f"Failed to parse patch with unidiff: {e}, falling back to manual parsing")
@@ -136,7 +136,7 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, List[int
                 source_line = int(match.group(1))
         elif current_file and line.startswith('-') and not line.startswith('---'):
             # Deleted line - record it
-            result[current_file].append(source_line)
+            result[current_file].add(source_line)
             source_line += 1
         elif current_file and not line.startswith('+'):
             # Context line
@@ -168,23 +168,36 @@ def extract_modified_files(patch_str: str) -> Set[str]:
     return files
 
 
-def git_blame_line(repo_path: str, file_path: str, line_num: int, commit: str) -> Optional[str]:
+def git_blame_lines(
+    repo_path: str, 
+    file_path: str, 
+    commit: str, 
+    start_line: int, 
+    end_line: int | None = None
+) -> Dict[int, str]:
     """
-    Run git blame to find which commit last modified a specific line.
+    Run git blame to find which commits last modified a range of lines.
     
     Args:
         repo_path: Path to git repository
         file_path: Relative path to file within repo
-        line_num: Line number to blame (1-indexed)
         commit: Commit SHA to blame at (typically base_commit of the PR)
+        start_line: Starting line number (1-indexed)
+        end_line: Ending line number (1-indexed), or None to blame just start_line
         
     Returns:
-        Commit SHA that last modified this line, or None if blame fails
+        Dict mapping line numbers to commit SHAs
+        
+    Raises:
+        RuntimeError: If git blame fails
     """
+    if end_line is None:
+        end_line = start_line
+    
     try:
-        # Use git blame with -L to blame just one line
+        # Use git blame with -L to blame line range
         result = subprocess.run(
-            ['git', 'blame', '-L', f'{line_num},{line_num}', commit, '--', file_path],
+            ['git', 'blame', '-L', f'{start_line},{end_line}', commit, '--', file_path],
             cwd=repo_path,
             capture_output=True,
             text=True,
@@ -192,93 +205,201 @@ def git_blame_line(repo_path: str, file_path: str, line_num: int, commit: str) -
         )
         
         if result.returncode != 0:
-            return None
+            raise RuntimeError(
+                f"Git blame failed for {file_path}:{start_line}-{end_line}: {result.stderr}"
+            )
         
         # Parse output: "commit_sha (author date time linenum) line content"
         output = result.stdout.strip()
-        if output:
-            # Extract commit SHA (first token)
-            commit_sha = output.split()[0]
-            # Remove leading ^ if present (means line existed in initial commit)
-            return commit_sha.lstrip('^')
+        if not output:
+            raise RuntimeError(
+                f"Git blame returned empty output for {file_path}:{start_line}-{end_line}"
+            )
         
-        return None
+        blame_map = {}
+        for line in output.split('\n'):
+            if not line:
+                continue
+            # Extract commit SHA (first token)
+            commit_sha = line.split()[0]
+            # Remove leading ^ if present (means line existed in initial commit)
+            commit_sha = commit_sha.lstrip('^')
+            
+            # Validate commit SHA format (40 hex chars)
+            assert len(commit_sha) == 40 and all(c in '0123456789abcdef' for c in commit_sha.lower()), \
+                f"Invalid commit SHA format: {commit_sha}"
+            
+            # Extract line number from blame output
+            # Format: "commit_sha (author date time linenum) line content"
+            match = re.search(r'\(.*?\s+(\d+)\)', line)
+            if match:
+                line_num = int(match.group(1))
+                blame_map[line_num] = commit_sha
+        
+        return blame_map
+        
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"Git blame timed out for {file_path}:{start_line}-{end_line}") from e
     except Exception as e:
-        logger.debug(f"Git blame failed for {file_path}:{line_num}: {e}")
-        return None
+        raise RuntimeError(f"Git blame failed for {file_path}:{start_line}-{end_line}: {e}") from e
 
 
-def map_commit_to_pr(commit_sha: str, pr_nodes: Dict[int, PRNode], repo_path: str) -> Optional[int]:
+def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[str, int]:
     """
-    Map a commit SHA to a PR number.
+    Build a mapping from commit SHA to PR number for all PRs.
     
-    This checks if the commit is part of the PR's merge commit or any commits
-    in the PR's history.
+    This uses git log to find all commits in each PR's history.
     
     Args:
-        commit_sha: Commit SHA to map
         pr_nodes: All PR nodes in the DAG
         repo_path: Path to git repository
         
     Returns:
-        PR number if found, None otherwise
+        Dict mapping commit SHA to PR number
     """
-    # TODO: This is a simplified implementation
-    # In practice, you'd need to:
-    # 1. Get all commits in each PR (from base to head)
-    # 2. Check if commit_sha is in that range
-    # 3. Cache this mapping for performance
+    commit_to_pr = {}
     
-    # For now, we'll just return None and rely on other heuristics
-    # A full implementation would query git log for each PR's commit range
-    return None
+    for pr_number, node in pr_nodes.items():
+        try:
+            # Get all commits from base_commit to the PR's head
+            # We use the task_instance to get the head commit
+            head_commit = node.task_instance.get('head_commit')
+            if not head_commit:
+                logger.warning(f"PR {pr_number} missing head_commit, skipping commit mapping")
+                continue
+            
+            # Use git log to get all commits in this PR
+            result = subprocess.run(
+                ['git', 'log', '--format=%H', f'{node.base_commit}..{head_commit}'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                commits = result.stdout.strip().split('\n')
+                for commit_sha in commits:
+                    if commit_sha:  # Skip empty lines
+                        commit_to_pr[commit_sha] = pr_number
+        except Exception as e:
+            logger.warning(f"Failed to get commits for PR {pr_number}: {e}")
+            continue
+    
+    return commit_to_pr
 
 
-def calculate_blame_dependency(
-    target_pr: PRNode,
-    candidate_pr: PRNode,
-    repo_path: str,
-    commit_to_pr_map: Dict[str, int]
-) -> float:
+def build_blame_counter_for_pr(
+    pr_node: PRNode,
+    repo_path: str
+) -> Tuple[Counter[str], int]:
     """
-    Calculate what percentage of target PR's modified/deleted lines
-    trace back to candidate PR via git blame.
+    Build a counter of commit SHAs for all modified/deleted lines in a PR.
+    
+    This runs git blame once for each file (or contiguous line ranges) and aggregates
+    the results into a counter showing how many lines blame to each commit.
     
     Args:
-        target_pr: The newer PR we're analyzing
-        candidate_pr: The older PR we're checking as a potential dependency
+        pr_node: PR node to analyze
+        repo_path: Path to git repository
+        
+    Returns:
+        Tuple of (Counter mapping commit SHA to line count, total lines analyzed)
+    """
+    blame_counter = Counter()
+    total_lines = 0
+    
+    # For each file with modified/deleted lines
+    for file_path, line_nums in pr_node.modified_deleted_lines.items():
+        if not line_nums:
+            continue
+        
+        # Convert set to sorted list for range grouping
+        sorted_lines = sorted(line_nums)
+        total_lines += len(sorted_lines)
+        
+        # Group consecutive lines into ranges for efficient git blame
+        ranges = []
+        start = sorted_lines[0]
+        end = sorted_lines[0]
+        
+        for line_num in sorted_lines[1:]:
+            if line_num == end + 1:
+                # Extend current range
+                end = line_num
+            else:
+                # Save current range and start new one
+                ranges.append((start, end))
+                start = line_num
+                end = line_num
+        ranges.append((start, end))
+        
+        # Run git blame for each range
+        for start_line, end_line in ranges:
+            try:
+                blame_map = git_blame_lines(
+                    repo_path,
+                    file_path,
+                    pr_node.base_commit,
+                    start_line,
+                    end_line
+                )
+                # Count commits
+                for commit_sha in blame_map.values():
+                    blame_counter[commit_sha] += 1
+            except RuntimeError as e:
+                logger.warning(f"Failed to blame {file_path}:{start_line}-{end_line} for PR {pr_node.pr_number}: {e}")
+                continue
+    
+    return blame_counter, total_lines
+
+
+def calculate_blame_dependencies(
+    pr_node: PRNode,
+    all_pr_nodes: Dict[int, PRNode],
+    repo_path: str,
+    commit_to_pr_map: Dict[str, int]
+) -> Dict[int, float]:
+    """
+    Calculate blame-based dependencies for a PR against all other PRs.
+    
+    This uses a two-stage approach for efficiency:
+    1. Build blame counter for all modified/deleted lines in the PR (once)
+    2. Aggregate blame counts by PR and normalize to percentages
+    
+    Args:
+        pr_node: PR to analyze dependencies for
+        all_pr_nodes: All PR nodes in the DAG
         repo_path: Path to git repository
         commit_to_pr_map: Mapping of commit SHAs to PR numbers
         
     Returns:
-        Percentage (0.0 to 1.0) of target's modified/deleted lines that blame to candidate
+        Dict mapping PR numbers to blame dependency percentages (0.0 to 1.0)
     """
-    total_lines = 0
-    blamed_lines = 0
-    
-    # For each file modified/deleted in target PR
-    for file_path, line_nums in target_pr.modified_deleted_lines.items():
-        total_lines += len(line_nums)
-        
-        # For each modified/deleted line, run git blame at target's base commit
-        for line_num in line_nums:
-            blame_commit = git_blame_line(
-                repo_path,
-                file_path,
-                line_num,
-                target_pr.base_commit
-            )
-            
-            if blame_commit:
-                # Check if this commit belongs to candidate PR
-                blamed_pr = commit_to_pr_map.get(blame_commit)
-                if blamed_pr == candidate_pr.pr_number:
-                    blamed_lines += 1
+    # Stage 1: Build blame counter for this PR
+    blame_counter, total_lines = build_blame_counter_for_pr(pr_node, repo_path)
     
     if total_lines == 0:
-        return 0.0
+        return {}
     
-    return blamed_lines / total_lines
+    # Stage 2: Aggregate blame counts by PR
+    pr_blame_counts = defaultdict(int)
+    
+    for commit_sha, line_count in blame_counter.items():
+        # Look up which PR this commit belongs to
+        if commit_sha in commit_to_pr_map:
+            blamed_pr = commit_to_pr_map[commit_sha]
+            # Don't count self-dependencies
+            if blamed_pr != pr_node.pr_number:
+                pr_blame_counts[blamed_pr] += line_count
+    
+    # Stage 3: Normalize to percentages
+    blame_percentages = {
+        pr: count / total_lines
+        for pr, count in pr_blame_counts.items()
+    }
+    
+    return blame_percentages
 
 
 def build_dependency_dag(
@@ -346,15 +467,29 @@ def build_dependency_dag(
     # Sort by date (newest first)
     pr_nodes.sort(key=lambda x: x.created_at, reverse=True)
     
-    # Build commit to PR mapping if not provided
-    if commit_to_pr_map is None:
+    # Build commit to PR mapping if not provided and repo is available
+    if commit_to_pr_map is None and repo_path and os.path.exists(repo_path):
+        logger.info("Building commit-to-PR mapping...")
+        pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
+        commit_to_pr_map = build_commit_to_pr_map(pr_node_dict, repo_path)
+        logger.info(f"Mapped {len(commit_to_pr_map)} commits to PRs")
+    elif commit_to_pr_map is None:
         commit_to_pr_map = {}
-        # TODO: Build this by iterating through PR commit ranges
-        # For now, we'll work without it and rely on other heuristics
     
     # Process each PR against all earlier PRs
     for i, target_pr in enumerate(pr_nodes):
         logger.info(f"Analyzing dependencies for PR {target_pr.pr_number}")
+        
+        # Calculate blame dependencies for all earlier PRs at once (efficient!)
+        blame_dependencies = {}
+        if repo_path and os.path.exists(repo_path) and commit_to_pr_map:
+            pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
+            blame_dependencies = calculate_blame_dependencies(
+                target_pr,
+                pr_node_dict,
+                repo_path,
+                commit_to_pr_map
+            )
         
         # Look at all earlier PRs (later in list due to reverse sort)
         for candidate_pr in pr_nodes[i+1:]:
@@ -374,15 +509,9 @@ def build_dependency_dag(
             if not (target_pr.modified_files & candidate_pr.modified_files):
                 continue
             
-            # Git blame analysis
-            if repo_path and os.path.exists(repo_path):
-                blame_pct = calculate_blame_dependency(
-                    target_pr,
-                    candidate_pr,
-                    repo_path,
-                    commit_to_pr_map
-                )
-                
+            # Check if we have blame dependency for this candidate
+            if candidate_pr.pr_number in blame_dependencies:
+                blame_pct = blame_dependencies[candidate_pr.pr_number]
                 if blame_pct >= blame_threshold:
                     dag.add_edge(target_pr.pr_number, candidate_pr.pr_number, blame_pct)
                     logger.info(f"  → Blame-based dependency on PR {candidate_pr.pr_number} ({blame_pct:.1%})")
