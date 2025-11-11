@@ -418,7 +418,7 @@ def validate_chain_id(chain_id: str) -> bool:
 
 def build_chains_from_repository_data(
     task_instances: List[Dict[str, Any]],
-    repo_path: Optional[str] = None,
+    repo_path: str,
     time_window_months: int = 6,
     blame_threshold: float = 0.1,
     num_chains: int = 10,
@@ -438,7 +438,7 @@ def build_chains_from_repository_data(
     
     Args:
         task_instances: List of task instance dictionaries
-        repo_path: Path to git repository for blame analysis (optional)
+        repo_path: Path to git repository for blame analysis (required)
         time_window_months: Maximum age difference for dependencies (default: 6)
         blame_threshold: Minimum blame % for dependency (default: 0.1 = 10%)
         num_chains: Number of chains to sample from DAG
@@ -459,7 +459,7 @@ def build_chains_from_repository_data(
     # Build the dependency DAG
     dag = build_dependency_dag(
         task_instances,
-        repo_path=repo_path or "",
+        repo_path=repo_path,
         time_window_months=time_window_months,
         blame_threshold=blame_threshold
     )
@@ -522,7 +522,7 @@ def load_chains_from_jsonl(input_file: str) -> List[Chain]:
 def convert_single_instances_to_chains(
     input_file: str,
     output_file: str,
-    repo_path: Optional[str] = None,
+    repo_path: str,
     **kwargs
 ) -> None:
     """
@@ -531,7 +531,7 @@ def convert_single_instances_to_chains(
     Args:
         input_file: Path to input JSONL file with single instances
         output_file: Path to output JSONL file with chains
-        repo_path: Path to git repository for blame analysis (optional)
+        repo_path: Path to git repository for blame analysis (required)
         **kwargs: Additional arguments to pass to build_chains_from_repository_data
     """
     # Load single instances

@@ -335,13 +335,17 @@ class TestChainBuilding:
             }
         ]
         
-        # Build chains without repo_path (git blame won't run)
-        chains = build_chains_from_repository_data(
-            task_instances,
-            repo_path=None,
-            num_chains=5,
-            min_chain_length=1
-        )
+        # Build chains with a temp repo (git blame will be attempted but may not find commits)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize a git repo
+            os.system(f"cd {tmpdir} && git init -q && git config user.email 'test@test.com' && git config user.name 'Test'")
+            
+            chains = build_chains_from_repository_data(
+                task_instances,
+                repo_path=tmpdir,
+                num_chains=5,
+                min_chain_length=1
+            )
         
         # Should create some chains based on issue relationships
         assert len(chains) > 0
@@ -363,12 +367,16 @@ class TestChainBuilding:
             for i in range(3)
         ]
         
-        chains = build_chains_from_repository_data(
-            task_instances,
-            repo_path=None,
-            num_chains=10,
-            min_chain_length=1
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize a git repo
+            os.system(f"cd {tmpdir} && git init -q && git config user.email 'test@test.com' && git config user.name 'Test'")
+            
+            chains = build_chains_from_repository_data(
+                task_instances,
+                repo_path=tmpdir,
+                num_chains=10,
+                min_chain_length=1
+            )
         
         # Should create at least some chains
         assert len(chains) >= 0  # May be empty if no dependencies found
@@ -441,13 +449,17 @@ class TestChainFileOperations:
         
         try:
             # Convert single instances to chains using DAG-based analysis
-            convert_single_instances_to_chains(
-                input_file,
-                output_file,
-                repo_path=None,  # No git repo, will use issue-based dependencies
-                num_chains=5,
-                min_chain_length=1
-            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # Initialize a git repo
+                os.system(f"cd {tmpdir} && git init -q && git config user.email 'test@test.com' && git config user.name 'Test'")
+                
+                convert_single_instances_to_chains(
+                    input_file,
+                    output_file,
+                    repo_path=tmpdir,
+                    num_chains=5,
+                    min_chain_length=1
+                )
             
             # Load and verify chains
             chains = load_chains_from_jsonl(output_file)
