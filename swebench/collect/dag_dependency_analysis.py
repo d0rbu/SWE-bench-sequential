@@ -277,13 +277,21 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
                 timeout=10
             )
             
-            if result.returncode == 0:
-                commits = result.stdout.strip().split('\n')
-                for commit_sha in commits:
-                    if commit_sha:  # Skip empty lines
-                        commit_to_pr[commit_sha] = pr_number
+            assert result.returncode == 0, f"git log failed for PR {pr_number}: {result.stderr}"
+            
+            commits = result.stdout.strip().split('\n')
+            for commit_sha in commits:
+                if not commit_sha:  # Early exit for empty lines
+                    continue
+                    
+                # Validate commit SHA format (40 hex chars)
+                if len(commit_sha) != 40 or not all(c in '0123456789abcdef' for c in commit_sha.lower()):
+                    logger.error(f"Invalid commit SHA format in PR {pr_number}: {commit_sha}")
+                    continue
+                    
+                commit_to_pr[commit_sha] = pr_number
         except Exception as e:
-            logger.warning(f"Failed to get commits for PR {pr_number}: {e}")
+            logger.error(f"Failed to get commits for PR {pr_number}: {e}")
             continue
     
     return commit_to_pr
@@ -389,9 +397,10 @@ def calculate_blame_dependencies(
         # Look up which PR this commit belongs to
         if commit_sha in commit_to_pr_map:
             blamed_pr = commit_to_pr_map[commit_sha]
-            # Don't count self-dependencies
-            if blamed_pr != pr_node.pr_number:
-                pr_blame_counts[blamed_pr] += line_count
+            # This should never happen - blame is done at base commit
+            assert blamed_pr != pr_node.pr_number, \
+                f"PR {pr_node.pr_number} blamed to itself for commit {commit_sha}"
+            pr_blame_counts[blamed_pr] += line_count
     
     # Stage 3: Normalize to percentages
     blame_percentages = {
@@ -404,10 +413,9 @@ def calculate_blame_dependencies(
 
 def build_dependency_dag(
     task_instances: List[Dict[str, Any]],
-    repo_path: str,
+    repo_path: Optional[str] = None,
     time_window_months: int = 6,
-    blame_threshold: float = 0.1,
-    commit_to_pr_map: Optional[Dict[str, int]] = None
+    blame_threshold: float = 0.05
 ) -> DependencyDAG:
     """
     Build a dependency DAG from task instances using git blame analysis.
@@ -418,15 +426,14 @@ def build_dependency_dag(
        a. Same issue → automatic dependency
        b. >6 months old → skip
        c. No file overlap → skip  
-       d. Otherwise → calculate blame percentage
+       d. Otherwise → calculate blame percentage (if repo_path provided)
        e. If blame % > threshold → add dependency
     
     Args:
         task_instances: List of task instance dictionaries
-        repo_path: Path to git repository for blame analysis
+        repo_path: Optional path to git repository for blame analysis (default: None, skips blame)
         time_window_months: Maximum age difference for dependencies (default: 6)
-        blame_threshold: Minimum blame percentage for dependency (default: 0.1 = 10%)
-        commit_to_pr_map: Optional mapping of commits to PRs (built if not provided)
+        blame_threshold: Minimum blame percentage for dependency (default: 0.05 = 5%)
         
     Returns:
         DependencyDAG with nodes and weighted edges
@@ -467,20 +474,19 @@ def build_dependency_dag(
     # Sort by date (newest first)
     pr_nodes.sort(key=lambda x: x.created_at, reverse=True)
     
-    # Build commit to PR mapping if not provided and repo is available
-    if commit_to_pr_map is None and repo_path and os.path.exists(repo_path):
-        logger.info("Building commit-to-PR mapping...")
+    # Build commit to PR mapping if repo is provided
+    commit_to_pr_map = {}
+    if repo_path and os.path.exists(repo_path):
+        logger.debug("Building commit-to-PR mapping...")
         pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
         commit_to_pr_map = build_commit_to_pr_map(pr_node_dict, repo_path)
-        logger.info(f"Mapped {len(commit_to_pr_map)} commits to PRs")
-    elif commit_to_pr_map is None:
-        commit_to_pr_map = {}
+        logger.debug(f"Mapped {len(commit_to_pr_map)} commits to PRs")
     
     # Process each PR against all earlier PRs
     for i, target_pr in enumerate(pr_nodes):
         logger.info(f"Analyzing dependencies for PR {target_pr.pr_number}")
         
-        # Calculate blame dependencies for all earlier PRs at once (efficient!)
+        # Calculate blame dependencies if repo is available
         blame_dependencies = {}
         if repo_path and os.path.exists(repo_path) and commit_to_pr_map:
             pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
