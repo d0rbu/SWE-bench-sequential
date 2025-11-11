@@ -168,6 +168,19 @@ def extract_modified_files(patch_str: str) -> Set[str]:
     return files
 
 
+def is_valid_commit_sha(commit_sha: str) -> bool:
+    """
+    Validate that a string is a valid git commit SHA (40 hex characters).
+    
+    Args:
+        commit_sha: String to validate
+        
+    Returns:
+        True if valid commit SHA, False otherwise
+    """
+    return len(commit_sha) == 40 and all(c in '0123456789abcdef' for c in commit_sha.lower())
+
+
 def git_blame_lines(
     repo_path: str, 
     file_path: str, 
@@ -225,9 +238,8 @@ def git_blame_lines(
             # Remove leading ^ if present (means line existed in initial commit)
             commit_sha = commit_sha.lstrip('^')
             
-            # Validate commit SHA format (40 hex chars)
-            assert len(commit_sha) == 40 and all(c in '0123456789abcdef' for c in commit_sha.lower()), \
-                f"Invalid commit SHA format: {commit_sha}"
+            # Validate commit SHA format
+            assert is_valid_commit_sha(commit_sha), f"Invalid commit SHA format: {commit_sha}"
             
             # Extract line number from blame output
             # Format: "commit_sha (author date time linenum) line content"
@@ -281,11 +293,10 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             
             commits = result.stdout.strip().split('\n')
             for commit_sha in commits:
-                if not commit_sha:  # Early exit for empty lines
+                if not commit_sha:
                     continue
                     
-                # Validate commit SHA format (40 hex chars)
-                if len(commit_sha) != 40 or not all(c in '0123456789abcdef' for c in commit_sha.lower()):
+                if not is_valid_commit_sha(commit_sha):
                     logger.error(f"Invalid commit SHA format in PR {pr_number}: {commit_sha}")
                     continue
                     
@@ -438,6 +449,10 @@ def build_dependency_dag(
     Returns:
         DependencyDAG with nodes and weighted edges
     """
+    # Assert repo_path exists if provided
+    if repo_path:
+        assert os.path.exists(repo_path), f"repo_path does not exist: {repo_path}"
+    
     dag = DependencyDAG()
     
     # Parse task instances into PR nodes
@@ -484,7 +499,7 @@ def build_dependency_dag(
     
     # Process each PR against all earlier PRs
     for i, target_pr in enumerate(pr_nodes):
-        logger.info(f"Analyzing dependencies for PR {target_pr.pr_number}")
+        logger.debug(f"Analyzing dependencies for PR {target_pr.pr_number}")
         
         # Calculate blame dependencies if repo is available
         blame_dependencies = {}
