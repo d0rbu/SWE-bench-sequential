@@ -34,15 +34,15 @@ REPO="${1:-scikit-learn/scikit-learn}"
 REPO_NAME="${REPO##*/}"
 REPO_OWNER="${REPO%/*}"
 
-# Get GitHub token from command line, GITHUB_TOKENS (first token), or GITHUB_TOKEN env var
+# Get GitHub token from command line, GITHUB_TOKEN env var, or GITHUB_TOKENS (first token)
 if [ -n "$2" ]; then
     GITHUB_TOKEN="$2"
+elif [ -n "$GITHUB_TOKEN" ]; then
+    GITHUB_TOKEN="$GITHUB_TOKEN"
 elif [ -n "$GITHUB_TOKENS" ]; then
     # Extract first token from comma-separated list
     GITHUB_TOKEN="${GITHUB_TOKENS%%,*}"
     echo "📋 Using first token from GITHUB_TOKENS for single-repo pipeline"
-elif [ -n "$GITHUB_TOKEN" ]; then
-    GITHUB_TOKEN="$GITHUB_TOKEN"
 else
     GITHUB_TOKEN=""
 fi
