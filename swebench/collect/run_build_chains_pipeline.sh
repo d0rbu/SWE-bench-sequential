@@ -16,18 +16,36 @@
 #   ./run_build_chains_pipeline.sh scikit-learn/scikit-learn
 #   ./run_build_chains_pipeline.sh pallets/flask $GITHUB_TOKEN
 #
-# If you'd like to parallelize, create a .env file with:
+# If you'd like to parallelize, create a .env file in this directory with:
 #   GITHUB_TOKENS=token1,token2,token3...
 
 set -e  # Exit on error
+
+# Load .env file if it exists (for GITHUB_TOKENS support)
+if [ -f .env ]; then
+    echo "📋 Loading environment variables from .env file..."
+    set -a  # automatically export all variables
+    source .env
+    set +a
+fi
 
 # Get repo from command line or use default
 REPO="${1:-scikit-learn/scikit-learn}"
 REPO_NAME="${REPO##*/}"
 REPO_OWNER="${REPO%/*}"
 
-# Get GitHub token from command line, environment, or use empty string
-GITHUB_TOKEN="${2:-${GITHUB_TOKEN:-}}"
+# Get GitHub token from command line, GITHUB_TOKEN env var, or GITHUB_TOKENS (first token)
+if [ -n "$2" ]; then
+    GITHUB_TOKEN="$2"
+elif [ -n "$GITHUB_TOKEN" ]; then
+    GITHUB_TOKEN="$GITHUB_TOKEN"
+elif [ -n "$GITHUB_TOKENS" ]; then
+    # Extract first token from comma-separated list
+    GITHUB_TOKEN="${GITHUB_TOKENS%%,*}"
+    echo "📋 Using first token from GITHUB_TOKENS for single-repo pipeline"
+else
+    GITHUB_TOKEN=""
+fi
 
 # Set up directories
 REPOS_DIR="repos"
