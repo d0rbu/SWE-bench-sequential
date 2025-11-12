@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 
-# Build chains from single task instances using DAG-based dependency analysis
+# Complete pipeline: Collect PRs, generate task instances, and build chains
 #
-# This script converts task instances (from run_get_tasks_pipeline.sh) into chains
-# of related PRs based on git blame analysis and issue dependencies.
-#
-# Prerequisites:
-#   1. Run run_get_tasks_pipeline.sh to generate task instances
-#   2. Clone the repository you want to analyze (if not already cloned)
+# This script is a superset of run_get_tasks_pipeline.sh that also builds chains.
+# It performs the full workflow:
+#   1. Clone repository (if needed)
+#   2. Collect PR data from GitHub
+#   3. Convert PRs to task instances
+#   4. Build chains using DAG-based dependency analysis
 #
 # Usage:
-#   ./run_build_chains_pipeline.sh <repo_owner/repo_name>
+#   ./run_build_chains_pipeline.sh <repo_owner/repo_name> [github_token]
 #
 # Example:
 #   ./run_build_chains_pipeline.sh scikit-learn/scikit-learn
+#   ./run_build_chains_pipeline.sh pallets/flask $GITHUB_TOKEN
 #
-# The script will:
-#   - Clone the repository to ./repos/ if it doesn't exist
-#   - Look for task instances in ./tasks/
-#   - Generate chains in ./chains/
+# If you'd like to parallelize, create a .env file with:
+#   GITHUB_TOKENS=token1,token2,token3...
 
 set -e  # Exit on error
 
@@ -27,43 +26,71 @@ REPO="${1:-scikit-learn/scikit-learn}"
 REPO_NAME="${REPO##*/}"
 REPO_OWNER="${REPO%/*}"
 
+# Get GitHub token from command line, environment, or use empty string
+GITHUB_TOKEN="${2:-${GITHUB_TOKEN:-}}"
+
 # Set up directories
 REPOS_DIR="repos"
+PRS_DIR="prs"
 TASKS_DIR="tasks"
 CHAINS_DIR="chains"
 
-mkdir -p "$REPOS_DIR" "$CHAINS_DIR"
+mkdir -p "$REPOS_DIR" "$PRS_DIR" "$TASKS_DIR" "$CHAINS_DIR"
 
-# Clone repository if it doesn't exist
+echo "════════════════════════════════════════════════════════════"
+echo "  Complete Pipeline for $REPO"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+
+# Step 1: Clone repository if it doesn't exist
+echo "📦 Step 1/4: Repository Setup"
 REPO_PATH="$REPOS_DIR/$REPO_NAME"
 if [ ! -d "$REPO_PATH" ]; then
-    echo "📦 Cloning $REPO to $REPO_PATH..."
+    echo "   Cloning $REPO to $REPO_PATH..."
     git clone "https://github.com/$REPO.git" "$REPO_PATH"
-    echo "✅ Repository cloned successfully"
+    echo "   ✅ Repository cloned successfully"
 else
-    echo "📁 Repository already exists at $REPO_PATH"
+    echo "   ✅ Repository already exists at $REPO_PATH"
 fi
+echo ""
 
-# Set file paths
-INPUT_FILE="$TASKS_DIR/$REPO_NAME-task-instances.jsonl"
-OUTPUT_FILE="$CHAINS_DIR/$REPO_NAME-chains.jsonl"
-
-# Check if input file exists
-if [ ! -f "$INPUT_FILE" ]; then
-    echo "❌ Error: Task instances file not found: $INPUT_FILE"
-    echo "   Please run run_get_tasks_pipeline.sh first to generate task instances."
-    exit 1
+# Step 2: Collect PR data from GitHub
+echo "🔍 Step 2/4: Collecting PR Data from GitHub"
+PRS_FILE="$PRS_DIR/$REPO_NAME-prs.jsonl"
+if [ -n "$GITHUB_TOKEN" ]; then
+    echo "   Using provided GitHub token"
+    uv run python print_pulls.py "$REPO" "$PRS_FILE" --token "$GITHUB_TOKEN"
+else
+    echo "   No GitHub token provided, using anonymous access (rate limited)"
+    uv run python print_pulls.py "$REPO" "$PRS_FILE"
 fi
+echo "   ✅ PR data saved to $PRS_FILE"
+echo ""
 
-echo "🔗 Building chains for $REPO..."
-echo "   Input: $INPUT_FILE"
-echo "   Output: $OUTPUT_FILE"
-echo "   Repo: $REPO_PATH"
+# Step 3: Convert PRs to task instances
+echo "🔧 Step 3/4: Converting PRs to Task Instances"
+TASKS_FILE="$TASKS_DIR/$REPO_NAME-task-instances.jsonl"
+if [ -n "$GITHUB_TOKEN" ]; then
+    uv run python build_dataset.py "$PRS_FILE" "$TASKS_FILE" --token "$GITHUB_TOKEN"
+else
+    uv run python build_dataset.py "$PRS_FILE" "$TASKS_FILE"
+fi
+echo "   ✅ Task instances saved to $TASKS_FILE"
+echo ""
 
-# Run the chain building pipeline
+# Step 4: Build chains from task instances
+echo "🔗 Step 4/4: Building Chains with DAG Analysis"
+CHAINS_FILE="$CHAINS_DIR/$REPO_NAME-chains.jsonl"
+echo "   Configuration:"
+echo "     - Repository: $REPO_PATH"
+echo "     - Num chains: 10"
+echo "     - Chain length: 2-5"
+echo "     - Blame threshold: 0.05"
+echo "     - Time window: 6 months"
+
 uv run python build_chains_pipeline.py \
-    --input_file "$INPUT_FILE" \
-    --output_file "$OUTPUT_FILE" \
+    --input_file "$TASKS_FILE" \
+    --output_file "$CHAINS_FILE" \
     --repo_path "$REPO_PATH" \
     --num_chains 10 \
     --min_chain_length 2 \
@@ -71,4 +98,13 @@ uv run python build_chains_pipeline.py \
     --blame_threshold 0.05 \
     --time_window_months 6
 
-echo "✅ Done! Chains saved to $OUTPUT_FILE"
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  ✅ Pipeline Complete!"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+echo "Generated files:"
+echo "  📄 PRs:           $PRS_FILE"
+echo "  📝 Task instances: $TASKS_FILE"
+echo "  🔗 Chains:        $CHAINS_FILE"
+echo ""
