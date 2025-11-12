@@ -18,7 +18,7 @@ def main(
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
-    blame_threshold: float = 0.1,
+    blame_threshold: float = 0.05,
     time_window_months: int = 6,
 ):
     """
@@ -34,7 +34,7 @@ def main(
         num_chains: Number of chains to build (default: 10)
         min_chain_length: Minimum length of chains to include (default: 2)
         max_chain_length: Maximum length of chains to create (default: 5)
-        blame_threshold: Minimum blame percentage to consider dependency (default: 0.1)
+        blame_threshold: Minimum blame percentage to consider dependency (default: 0.05)
         time_window_months: Time window in months for considering dependencies (default: 6)
     """
     # Validate inputs
@@ -123,8 +123,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--blame_threshold",
         type=float,
-        default=0.1,
-        help="Minimum blame percentage to consider dependency (default: 0.1)",
+        default=0.05,
+        help="Minimum blame percentage to consider dependency (default: 0.05)",
     )
     parser.add_argument(
         "--time_window_months",
@@ -134,4 +134,3 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(**vars(args))
-
