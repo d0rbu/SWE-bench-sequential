@@ -500,7 +500,6 @@ def build_dependency_dag(
         logger.debug(f"Analyzing dependencies for PR {target_pr.pr_number}")
         
         # Calculate blame dependencies for all earlier PRs
-        pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
         blame_dependencies = calculate_blame_dependencies(
             target_pr,
             pr_node_dict,
