@@ -25,6 +25,7 @@ def log_all_pulls(
     output: str,
     max_pulls: int = None,
     cutoff_date: str = None,
+    per_page: int = 100,
 ) -> None:
     """
     Iterate over all pull requests in a repository and log them to a file
@@ -32,6 +33,9 @@ def log_all_pulls(
     Args:
         repo (Repo): repository object
         output (str): output file name
+        max_pulls (int): maximum number of pulls to log
+        cutoff_date (str): cutoff date for PRs to consider
+        per_page (int): number of PRs per page (default: 100)
     """
     cutoff_date = (
         datetime.strptime(cutoff_date, "%Y%m%d").strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -39,8 +43,21 @@ def log_all_pulls(
         else None
     )
 
-    with open(output, "w") as file:
-        for i_pull, pull in enumerate(repo.get_all_pulls()):
+    # Check if output file exists and determine start page
+    start_page = 1
+    existing_pulls = 0
+    if os.path.exists(output):
+        with open(output, "r") as file:
+            existing_pulls = sum(1 for _ in file)
+        start_page = (existing_pulls // per_page) + 1
+        logger.info(
+            f"Resuming from page {start_page} (found {existing_pulls} existing pulls)"
+        )
+
+    # Open file in append mode if resuming, write mode if starting fresh
+    mode = "a" if existing_pulls > 0 else "w"
+    with open(output, mode) as file:
+        for i_pull, pull in enumerate(repo.get_all_pulls(per_page=per_page, start_page=start_page), start=existing_pulls):
             setattr(pull, "resolved_issues", repo.extract_resolved_issues(pull))
             print(json.dumps(obj2dict(pull)), end="\n", flush=True, file=file)
             if max_pulls is not None and i_pull >= max_pulls:
