@@ -293,3 +293,36 @@ def get_eval_report(
         report_map[instance_id]["tests_status"] = report  # type: ignore
 
     return report_map
+
+
+def compute_chain_metrics(chain_turns: list) -> dict:
+    """
+    Computes metrics for a multi-turn chain based on the evaluation results of each turn.
+    """
+    total_turns = len(chain_turns)
+    if total_turns == 0:
+        return {"error": "Empty chain"}
+
+    resolved_count = 0
+    trajectory_streak = 0
+    streak_broken = False
+
+    for turn in chain_turns:
+        result = turn.get('evaluation_result', {})
+        
+        is_resolved = result.get('resolved', False)
+
+        if is_resolved:
+            resolved_count += 1
+            if not streak_broken:
+                trajectory_streak += 1
+        else:
+            streak_broken = True
+
+    return {
+        "total_turns": total_turns,
+        "resolved_turns": resolved_count,
+        "success_rate": round(resolved_count / total_turns, 2),
+        "trajectory_streak": trajectory_streak,
+        "full_chain_success": resolved_count == total_turns
+    }

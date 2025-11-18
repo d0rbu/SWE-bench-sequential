@@ -43,6 +43,13 @@ SPECS_SKLEARN.update(
         for k in ["1.3", "1.4", "1.5", "1.6"]
     }
 )
+SPECS_SKLEARN["1.8"] = {
+    "python": "3.10",
+    "packages": "numpy=1.23 scipy=1.11 cython pytest pandas matplotlib setuptools joblib threadpoolctl",
+    "install": "python -m pip install -e .",
+    "pip_packages": ["cython", "setuptools", "numpy", "scipy"],
+    "test_cmd": TEST_PYTEST,
+}
 
 SPECS_FLASK = {
     "2.0": {

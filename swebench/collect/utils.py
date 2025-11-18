@@ -5,6 +5,7 @@ import logging
 import re
 import requests
 import time
+import os
 
 from bs4 import BeautifulSoup
 from ghapi.core import GhApi
@@ -266,6 +267,42 @@ def extract_problem_statement_and_hints(pull: dict, repo: Repo) -> tuple[str, st
     return text, "\n".join(all_hint_texts) if all_hint_texts else ""
 
 
+def extract_problem_statement_and_hints(pull: dict, repo: Repo) -> tuple[str, str]:
+    """
+    Extract problem statement from issues associated with a PR.
+    If no issues are linked, fall back to using the PR's title and body.
+    """
+    text = ""
+    all_hint_texts = list()
+    
+    # Primary Method: Use linked issues
+    if pull.get("resolved_issues"):
+        for issue_number in pull["resolved_issues"]:
+            issue = repo.call_api(
+                repo.api.issues.get,
+                owner=repo.owner,
+                repo=repo.name,
+                issue_number=issue_number,
+            )
+            if issue is None:
+                continue
+            
+            title = issue.title if issue.title else ""
+            body = issue.body if issue.body else ""
+            text += f"{title}\n{body}\n"
+            
+            # (Did not implemented hint extraction for PR-based problem statements for now)
+    
+    # Fallback Method: Use the PR's own title and body
+    if not text.strip():
+        title = pull.get("title", "") if pull.get("title") else ""
+        body = pull.get("body", "") if pull.get("body") else ""
+        text = f"{title}\n{body}\n".strip()
+
+    # For now, not extracted hints from the PR body itself, so hints remain empty on fallback.
+    return text, ""
+
+
 def _extract_hints(pull: dict, repo: Repo, issue_number: int) -> list[str]:
     """
     Extract hints from comments associated with a pull request (before first commit)
@@ -307,6 +344,33 @@ def _extract_hints(pull: dict, repo: Repo, issue_number: int) -> list[str]:
     # Keep text from comments
     comments = [comment.body for comment in comments]
     return comments
+
+
+def extract_modified_files(pull: dict, repo: Repo) -> list[str]:
+    """
+    Extract the list of modified files from a pull request using the GitHub API.
+
+    Args:
+        pull (dict): The pull request object from the GitHub API.
+        repo (Repo): The repository object containing the ghapi client.
+    
+    Returns:
+        list[str]: A list of file paths that were modified in the pull request.
+    """
+    try:
+        # Using the 'list_files' endpoint
+        files = repo.call_api(
+            repo.api.pulls.list_files,
+            owner=repo.owner,
+            repo=repo.name,
+            pull_number=pull['number']
+        )
+        if files:
+            return [f.filename for f in files]
+        return []
+    except Exception as e:
+        logger.error(f"Failed to extract modified files for PR #{pull['number']}: {e}")
+        return []
 
 
 def extract_patches(pull: dict, repo: Repo) -> tuple[str, str]:
@@ -405,3 +469,121 @@ def extract_problem_statement_and_hints_django(
                 all_hints_text.append((comment_text, timestamp))
 
     return text, all_hints_text
+
+
+def build_dependency_graph(prs_with_files: list[dict]) -> dict[int, set[int]]:
+    """
+    Builds a dependency graph from PRs using file overlap, issue references,
+    and temporal proximity. (WITH DIAGNOSTIC LOGGING)
+    """
+    adj_list = {pr['number']: set() for pr in prs_with_files}
+    
+    # --- Counters for our signals ---
+    edges_from_files = 0
+    edges_from_issues = 0
+    edges_from_temporal = 0
+
+    # --- Signal 1: File Overlap ---
+    file_to_prs = {}
+    for pr in prs_with_files:
+        for file_path in pr.get('modified_files', []):
+            if file_path not in file_to_prs:
+                file_to_prs[file_path] = []
+            file_to_prs[file_path].append(pr['number'])
+
+    for file_path, pr_numbers in file_to_prs.items():
+        if len(pr_numbers) > 1:
+            for i in range(len(pr_numbers)):
+                for j in range(i + 1, len(pr_numbers)):
+                    if pr_numbers[j] not in adj_list[pr_numbers[i]]:
+                        adj_list[pr_numbers[i]].add(pr_numbers[j])
+                        adj_list[pr_numbers[j]].add(pr_numbers[i])
+                        edges_from_files += 1
+
+    # --- Signal 2: Shared Issue References ---
+    issue_to_prs = {}
+    for pr in prs_with_files:
+        for issue_num in pr.get('resolved_issues', []):
+            if issue_num not in issue_to_prs:
+                issue_to_prs[issue_num] = []
+            issue_to_prs[issue_num].append(pr['number'])
+
+    for issue_num, pr_numbers in issue_to_prs.items():
+        if len(pr_numbers) > 1:
+            for i in range(len(pr_numbers)):
+                for j in range(i + 1, len(pr_numbers)):
+                    if pr_numbers[j] not in adj_list[pr_numbers[i]]:
+                        adj_list[pr_numbers[i]].add(pr_numbers[j])
+                        adj_list[pr_numbers[j]].add(pr_numbers[i])
+                        edges_from_issues += 1
+
+    # --- Signal 3: Temporal & Directory Proximity by Same Author ---
+    from datetime import datetime, timedelta
+    
+    author_prs = {}
+    for pr in prs_with_files:
+        author = pr.get('user', {}).get('login')
+        if not author:
+            continue
+        if author not in author_prs:
+            author_prs[author] = []
+        
+        created_at = datetime.fromisoformat(pr['created_at'].replace('Z', '+00:00'))
+        dirs = {os.path.dirname(f) for f in pr.get('modified_files', []) if f}
+        author_prs[author].append({'number': pr['number'], 'created_at': created_at, 'dirs': dirs})
+
+    for author, pr_list in author_prs.items():
+        if len(pr_list) > 1:
+            pr_list.sort(key=lambda p: p['created_at'])
+            for i in range(len(pr_list)):
+                for j in range(i + 1, len(pr_list)):
+                    pr1 = pr_list[i]
+                    pr2 = pr_list[j]
+                    if pr2['created_at'] - pr1['created_at'] < timedelta(days=7):
+                        if pr1['dirs'].intersection(pr2['dirs']):
+                            if pr2['number'] not in adj_list[pr1['number']]:
+                                adj_list[pr1['number']].add(pr2['number'])
+                                adj_list[pr2['number']].add(pr1['number'])
+                                edges_from_temporal += 1
+                    else:
+                        break
+    
+    # --- Final Diagnostic Printout ---
+    print("\n--- Dependency Graph Analysis ---")
+    print(f"Edges found from file overlap: {edges_from_files}")
+    print(f"Edges found from shared issues: {edges_from_issues}")
+    print(f"Edges found from temporal proximity: {edges_from_temporal}")
+    total_edges = sum(len(v) for v in adj_list.values()) // 2
+    print(f"Total unique edges in graph: {total_edges}")
+    print("---------------------------------\n")
+
+    return adj_list
+
+
+def find_connected_components(adj_list: dict[int, set[int]]) -> list[list[int]]:
+    """
+    Finds all connected components in a graph using Breadth-First Search (BFS).
+
+    Args:
+        adj_list (dict[int, set[int]]): The adjacency list of the graph.
+
+    Returns:
+        list[list[int]]: A list of lists, where each inner list contains the
+                         PR numbers of a connected component (a chain).
+    """
+    visited = set()
+    chains = []
+    for pr_number in adj_list:
+        if pr_number not in visited:
+            chain = []
+            queue = [pr_number]
+            visited.add(pr_number)
+            while queue:
+                current_pr = queue.pop(0)
+                chain.append(current_pr)
+                for neighbor in adj_list[current_pr]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+            chains.append(sorted(chain))
+    return chains
