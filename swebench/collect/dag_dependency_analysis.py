@@ -170,7 +170,8 @@ def extract_modified_files(patch_str: str) -> Set[str]:
 
 def is_valid_commit_sha(commit_sha: str) -> bool:
     """
-    Validate that a string is a valid git commit SHA (40 hex characters).
+    Validate that a string is a valid git commit SHA.
+    Accepts both full (40 chars) and abbreviated (7-40 chars) SHAs.
     
     Args:
         commit_sha: String to validate
@@ -178,7 +179,9 @@ def is_valid_commit_sha(commit_sha: str) -> bool:
     Returns:
         True if valid commit SHA, False otherwise
     """
-    return len(commit_sha) == 40 and all(c in '0123456789abcdef' for c in commit_sha.lower())
+    # Git abbreviated SHAs are typically 7-11 characters, but can be up to 40
+    # Accept any hex string between 7 and 40 characters
+    return 7 <= len(commit_sha) <= 40 and all(c in '0123456789abcdef' for c in commit_sha.lower())
 
 
 def git_blame_lines(
@@ -238,8 +241,10 @@ def git_blame_lines(
             # Remove leading ^ if present (means line existed in initial commit)
             commit_sha = commit_sha.lstrip('^')
             
-            # Validate commit SHA format
-            assert is_valid_commit_sha(commit_sha), f"Invalid commit SHA format: {commit_sha}"
+            # Validate commit SHA format (accept both full and abbreviated SHAs)
+            if not is_valid_commit_sha(commit_sha):
+                logger.warning(f"Skipping invalid commit SHA format: {commit_sha}")
+                continue
             
             # Extract line number from blame output
             # Format: "commit_sha (author date time linenum) line content"
