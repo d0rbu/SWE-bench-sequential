@@ -98,6 +98,9 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]
     """
     Parse unified diff to extract modified/deleted line numbers.
     
+    Returns a dict mapping file paths to line numbers that were modified/deleted.
+    For renamed files, uses the SOURCE (old) filename since that's what exists at base_commit.
+    
     NOTE: We explicitly exclude added lines - they can't have prior blame.
     NOTE: We skip newly created files - they have no prior history to blame.
     """
@@ -113,7 +116,12 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]
             if patched_file.is_added_file:
                 continue
             
-            file_path = patched_file.path
+            # For renamed files, use the source (old) filename for blame
+            # since that's what exists at the base commit
+            if patched_file.is_rename:
+                file_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
+            else:
+                file_path = patched_file.path
             for hunk in patched_file:
                 for line in hunk:
                     # Only removed lines (is_removed = True)
@@ -138,12 +146,15 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]
             if line.startswith('--- /dev/null'):
                 is_new_file = True
             elif line.startswith('--- a/'):
+                # Use source filename (this is what exists at base commit)
                 current_file = line[6:].strip()
         elif line.startswith('+++ b/'):
             if is_new_file:
                 # This is a new file, skip it
                 current_file = None
                 continue
+            # For renamed files, current_file is already set to source filename
+            # Only update if we don't have a source filename yet
             if not current_file:
                 current_file = line[6:].strip()
         elif line.startswith('@@'):
