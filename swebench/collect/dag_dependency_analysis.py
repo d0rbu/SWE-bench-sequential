@@ -296,7 +296,6 @@ def git_blame_lines(
     except Exception as e:
         raise RuntimeError(f"Git blame failed for {file_path}:{start_line}-{end_line}: {e}") from e
 
-
 def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[str, int]:
     """
     Build a mapping from commit SHA to PR number for all PRs.
@@ -317,9 +316,7 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             # Get all commits from base_commit to the PR's head
             # We use the task_instance to get the head commit
             head_commit = node.task_instance.get('head_commit')
-            if not head_commit:
-                logger.warning(f"PR {pr_number} missing head_commit, skipping commit mapping")
-                continue
+            assert head_commit, f"PR {pr_number} missing head_commit"
             
             # Use git log to get all commits in this PR
             result = subprocess.run(
