@@ -99,6 +99,7 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]
     Parse unified diff to extract modified/deleted line numbers.
     
     NOTE: We explicitly exclude added lines - they can't have prior blame.
+    NOTE: We skip newly created files - they have no prior history to blame.
     """
     if not patch_str or not patch_str.strip():
         return {}
@@ -108,6 +109,10 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]
     try:
         patch_set = unidiff.PatchSet(patch_str)
         for patched_file in patch_set:
+            # Skip new files (they have no prior history to blame)
+            if patched_file.is_added_file:
+                continue
+            
             file_path = patched_file.path
             for hunk in patched_file:
                 for line in hunk:
@@ -122,18 +127,32 @@ def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]
     # Fallback manual parsing
     result.clear()
     current_file = None
+    is_new_file = False
     source_line = 1
     
     for line in patch_str.split('\n'):
-        if line.startswith('--- a/'):
-            current_file = line[6:].strip()
+        if line.startswith('--- '):
+            current_file = None
+            is_new_file = False
+            # Check if this is a new file (--- /dev/null)
+            if line.startswith('--- /dev/null'):
+                is_new_file = True
+            elif line.startswith('--- a/'):
+                current_file = line[6:].strip()
         elif line.startswith('+++ b/'):
+            if is_new_file:
+                # This is a new file, skip it
+                current_file = None
+                continue
             if not current_file:
                 current_file = line[6:].strip()
         elif line.startswith('@@'):
             match = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', line)
             if match:
                 source_line = int(match.group(1))
+                # If source line is 0, this is a new file
+                if source_line == 0:
+                    current_file = None
         elif current_file and line.startswith('-') and not line.startswith('---'):
             # Deleted line - record it
             result[current_file].add(source_line)
@@ -221,8 +240,14 @@ def git_blame_lines(
         )
         
         if result.returncode != 0:
+            # Check if error is due to file not existing at this commit
+            stderr = result.stderr.strip()
+            if "no such path" in stderr or "does not exist" in stderr:
+                raise RuntimeError(
+                    f"File {file_path} does not exist at commit {commit}"
+                )
             raise RuntimeError(
-                f"Git blame failed for {file_path}:{start_line}-{end_line}: {result.stderr}"
+                f"Git blame failed for {file_path}:{start_line}-{end_line}: {stderr}"
             )
         
         # Parse output: "commit_sha (author date time linenum) line content"
