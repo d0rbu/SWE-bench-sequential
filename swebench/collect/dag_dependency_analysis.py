@@ -297,6 +297,104 @@ def git_blame_lines(
         raise RuntimeError(f"Git blame failed for {file_path}:{start_line}-{end_line}: {e}") from e
 
 
+def _infer_head_commit_from_patch(repo_path: str, base_commit: str, patch: str) -> Optional[str]:
+    """
+    Infer the head commit by applying the patch to base_commit in a temporary worktree.
+    
+    This is a fallback for when head_commit is not available in the task instance.
+    
+    Args:
+        repo_path: Path to git repository
+        base_commit: Base commit SHA
+        patch: Patch string to apply
+        
+    Returns:
+        Head commit SHA if successful, None otherwise
+    """
+    if not patch or not patch.strip():
+        return None
+    
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worktree_path = Path(tmpdir) / "worktree"
+            
+            # Create a temporary worktree at base_commit
+            result = subprocess.run(
+                ['git', 'worktree', 'add', '--detach', str(worktree_path), base_commit],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                logger.debug(f"Failed to create worktree: {result.stderr}")
+                return None
+            
+            try:
+                # Apply the patch
+                result = subprocess.run(
+                    ['git', 'apply', '--verbose'],
+                    cwd=worktree_path,
+                    input=patch,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode != 0:
+                    logger.debug(f"Failed to apply patch: {result.stderr}")
+                    return None
+                
+                # Commit the changes
+                subprocess.run(
+                    ['git', 'add', '-A'],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=10
+                )
+                
+                result = subprocess.run(
+                    ['git', 'commit', '-m', 'Applied patch'],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if result.returncode != 0:
+                    logger.debug(f"Failed to commit: {result.stderr}")
+                    return None
+                
+                # Get the commit SHA
+                result = subprocess.run(
+                    ['git', 'rev-parse', 'HEAD'],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if result.returncode == 0:
+                    commit_sha = result.stdout.strip()
+                    if is_valid_commit_sha(commit_sha):
+                        return commit_sha
+                
+            finally:
+                # Clean up worktree
+                subprocess.run(
+                    ['git', 'worktree', 'remove', '--force', str(worktree_path)],
+                    cwd=repo_path,
+                    capture_output=True,
+                    timeout=10
+                )
+    
+    except Exception as e:
+        logger.debug(f"Failed to infer head commit from patch: {e}")
+    
+    return None
+
+
 def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[str, int]:
     """
     Build a mapping from commit SHA to PR number for all PRs.
@@ -318,8 +416,17 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             # We use the task_instance to get the head commit
             head_commit = node.task_instance.get('head_commit')
             if not head_commit:
-                logger.warning(f"PR {pr_number} missing head_commit, skipping commit mapping")
-                continue
+                # Fallback: try to infer head_commit from the patch
+                # Apply the patch to base_commit in a temporary location and get the resulting commit
+                head_commit = _infer_head_commit_from_patch(
+                    repo_path, 
+                    node.base_commit, 
+                    node.task_instance.get('patch', '')
+                )
+                if not head_commit:
+                    logger.warning(f"PR {pr_number} missing head_commit and couldn't infer it, skipping commit mapping")
+                    continue
+                logger.debug(f"PR {pr_number}: inferred head_commit {head_commit} from patch")
             
             # Use git log to get all commits in this PR
             result = subprocess.run(
