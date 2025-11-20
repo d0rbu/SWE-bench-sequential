@@ -88,12 +88,17 @@ echo ""
 # Step 3: Convert PRs to task instances
 echo "🔧 Step 3/4: Converting PRs to Task Instances"
 TASKS_FILE="$TASKS_DIR/$REPO_NAME-task-instances.jsonl"
-if [ -n "$GITHUB_TOKEN" ]; then
-    uv run python build_dataset.py "$PRS_FILE" "$TASKS_FILE" --token "$GITHUB_TOKEN"
+if [ ! -f "$TASKS_FILE" ]; then
+    echo "   Building task instances..."
+    if [ -n "$GITHUB_TOKEN" ]; then
+        uv run python build_dataset.py "$PRS_FILE" "$TASKS_FILE" --token "$GITHUB_TOKEN"
+    else
+        uv run python build_dataset.py "$PRS_FILE" "$TASKS_FILE"
+    fi
+    echo "   ✅ Task instances saved to $TASKS_FILE"
 else
-    uv run python build_dataset.py "$PRS_FILE" "$TASKS_FILE"
+    echo "   ✅ Task instances already exist at $TASKS_FILE"
 fi
-echo "   ✅ Task instances saved to $TASKS_FILE"
 echo ""
 
 # Step 4: Build chains from task instances
