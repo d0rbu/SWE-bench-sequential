@@ -490,19 +490,30 @@ def calculate_blame_dependencies(
     blame_counter, total_lines = build_blame_counter_for_pr(pr_node, repo_path)
     
     if total_lines == 0:
+        logger.debug(f"PR {pr_node.pr_number}: No modified/deleted lines to blame")
         return {}
+    
+    logger.debug(f"PR {pr_node.pr_number}: Blamed {total_lines} lines to {len(blame_counter)} unique commits")
     
     # Stage 2: Aggregate blame counts by PR
     pr_blame_counts = defaultdict(int)
+    commits_in_map = 0
+    commits_not_in_map = 0
     
     for commit_sha, line_count in blame_counter.items():
         # Look up which PR this commit belongs to
         if commit_sha in commit_to_pr_map:
+            commits_in_map += 1
             blamed_pr = commit_to_pr_map[commit_sha]
             # This should never happen - blame is done at base commit
             assert blamed_pr != pr_node.pr_number, \
                 f"PR {pr_node.pr_number} blamed to itself for commit {commit_sha}"
             pr_blame_counts[blamed_pr] += line_count
+        else:
+            commits_not_in_map += 1
+    
+    if commits_not_in_map > 0:
+        logger.debug(f"PR {pr_node.pr_number}: {commits_in_map} commits found in map, {commits_not_in_map} not found (likely older PRs not in dataset)")
     
     # Stage 3: Normalize to percentages
     blame_percentages = {
@@ -581,13 +592,29 @@ def build_dependency_dag(
     pr_nodes.sort(key=lambda x: x.created_at, reverse=True)
     
     # Build commit to PR mapping
-    logger.debug("Building commit-to-PR mapping...")
+    logger.error("Building commit-to-PR mapping...")
     pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
     commit_to_pr_map = build_commit_to_pr_map(pr_node_dict, repo_path)
-    logger.debug(f"Mapped {len(commit_to_pr_map)} commits to PRs")
+    logger.debug(f"Mapped {len(commit_to_pr_map)} commits to {len(set(commit_to_pr_map.values()))} PRs")
+    
+    if len(commit_to_pr_map) == 0:
+        logger.warning("WARNING: commit_to_pr_map is empty! No blame-based dependencies will be detected.")
     
     # Process each PR against all earlier PRs
+    stats = {
+        'total_comparisons': 0,
+        'filtered_time': 0,
+        'filtered_no_issues': 0,
+        'filtered_no_file_overlap': 0,
+        'issue_based': 0,
+        'blame_checked': 0,
+        'blame_below_threshold': 0,
+        'blame_based': 0
+    }
+    
     for i, target_pr in enumerate(pr_nodes):
+        if i % 100 == 0:
+            logger.info(f"Progress: Analyzed {i}/{len(pr_nodes)} PRs")
         logger.debug(f"Analyzing dependencies for PR {target_pr.pr_number}")
         
         # Calculate blame dependencies for all earlier PRs
@@ -597,31 +624,61 @@ def build_dependency_dag(
             repo_path,
             commit_to_pr_map
         )
+        logger.debug(f"  Found {len(blame_dependencies)} PRs with blame dependencies")
         
         # Look at all earlier PRs (later in list due to reverse sort)
+        candidates_in_window = 0
         for candidate_pr in pr_nodes[i+1:]:
+            stats['total_comparisons'] += 1
+            
             # Filter 1: Check temporal proximity
             age_diff = target_pr.created_at - candidate_pr.created_at
             if age_diff.days > time_window_months * 30:
+                stats['filtered_time'] += 1
                 continue
+            
+            candidates_in_window += 1
             
             # Filter 2: Check for shared issues (automatic dependency)
             if target_pr.issues and candidate_pr.issues:
                 if target_pr.issues & candidate_pr.issues:
                     dag.add_edge(target_pr.pr_number, candidate_pr.pr_number, 1.0)
                     logger.info(f"  → Issue-based dependency on PR {candidate_pr.pr_number}")
+                    stats['issue_based'] += 1
                     continue
             
             # Filter 3: Check for file overlap
             if not (target_pr.modified_files & candidate_pr.modified_files):
+                stats['filtered_no_file_overlap'] += 1
                 continue
             
             # Check if we have blame dependency for this candidate
+            stats['blame_checked'] += 1
             if candidate_pr.pr_number in blame_dependencies:
                 blame_pct = blame_dependencies[candidate_pr.pr_number]
                 if blame_pct >= blame_threshold:
                     dag.add_edge(target_pr.pr_number, candidate_pr.pr_number, blame_pct)
-                    logger.info(f"  → Blame-based dependency on PR {candidate_pr.pr_number} ({blame_pct:.1%})")
+                    logger.debug(f"  → Blame-based dependency on PR {candidate_pr.pr_number} ({blame_pct:.1%})")
+                    stats['blame_based'] += 1
+                else:
+                    stats['blame_below_threshold'] += 1
+                    logger.debug(f"  Blame dependency on PR {candidate_pr.pr_number} below threshold: {blame_pct:.1%}")
+        
+        if candidates_in_window > 0:
+            logger.debug(f"  Checked {candidates_in_window} candidates within time window")
+    
+    # Log final statistics
+    logger.info("\n" + "="*60)
+    logger.info("DAG Construction Statistics:")
+    logger.info(f"  Total PR comparisons: {stats['total_comparisons']:,}")
+    logger.info(f"  Filtered by time window: {stats['filtered_time']:,}")
+    logger.info(f"  Filtered by no file overlap: {stats['filtered_no_file_overlap']:,}")
+    logger.info(f"  Issue-based dependencies found: {stats['issue_based']}")
+    logger.info(f"  Blame checks performed: {stats['blame_checked']:,}")
+    logger.info(f"  Blame-based dependencies found: {stats['blame_based']}")
+    logger.info(f"  Blame below threshold: {stats['blame_below_threshold']:,}")
+    logger.info(f"  Commit-to-PR map size: {len(commit_to_pr_map):,} commits")
+    logger.info("="*60 + "\n")
     
     return dag
 
