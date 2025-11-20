@@ -358,6 +358,7 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
         Dict mapping commit SHA to PR number
     """
     commit_to_pr = {}
+    prs_with_no_commits = []
     
     for pr_number, node in pr_nodes.items():
         try:
@@ -365,6 +366,8 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             # We use the task_instance to get the head commit
             head_commit = node.task_instance.get('head_commit')
             assert head_commit, f"PR {pr_number} missing head_commit"
+            
+            logger.debug(f"PR {pr_number}: base={node.base_commit[:8]}, head={head_commit[:8]}")
             
             # Ensure both base and head commits exist, fetching if needed
             for commit_sha, commit_type in [(node.base_commit, 'base'), (head_commit, 'head')]:
@@ -383,6 +386,7 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             assert result.returncode == 0, f"git log failed for PR {pr_number}: {result.stderr}"
             
             commits = result.stdout.strip().split('\n')
+            commit_count = 0
             for commit_sha in commits:
                 if not commit_sha:
                     continue
@@ -392,9 +396,20 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
                     continue
                     
                 commit_to_pr[commit_sha] = pr_number
+                commit_count += 1
+            
+            if commit_count == 0:
+                prs_with_no_commits.append(pr_number)
+                logger.warning(f"PR {pr_number}: Found 0 commits between base and head!")
+            else:
+                logger.debug(f"PR {pr_number}: Found {commit_count} commits")
+                
         except Exception as e:
             logger.error(f"Failed to get commits for PR {pr_number}: {e}")
             continue
+    
+    if prs_with_no_commits:
+        logger.warning(f"WARNING: {len(prs_with_no_commits)}/{len(pr_nodes)} PRs have no commits between base and head: {prs_with_no_commits[:10]}{'...' if len(prs_with_no_commits) > 10 else ''}")
     
     return commit_to_pr
 
