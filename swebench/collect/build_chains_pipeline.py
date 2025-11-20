@@ -4,6 +4,7 @@
 
 import argparse
 import json
+import logging
 import os
 
 from swebench.collect.chain_construction import (
@@ -20,6 +21,7 @@ def main(
     max_chain_length: int = 5,
     blame_threshold: float = 0.05,
     time_window_months: int = 6,
+    log_level: str = "INFO",
 ):
     """
     Build chains from single task instances using DAG-based dependency analysis.
@@ -36,7 +38,24 @@ def main(
         max_chain_length: Maximum length of chains to create (default: 5)
         blame_threshold: Minimum blame percentage to consider dependency (default: 0.05)
         time_window_months: Time window in months for considering dependencies (default: 6)
+        log_level: Logging level (default: INFO)
     """
+    # Configure logging
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f'Invalid log level: {log_level}')
+    
+    # Set up logging for all relevant modules
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True  # Override any existing configuration
+    )
+    
+    # Set specific loggers
+    logging.getLogger('swebench.collect.dag_dependency_analysis').setLevel(numeric_level)
+    logging.getLogger('swebench.collect.chain_construction').setLevel(numeric_level)
+    
     # Validate inputs
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -131,6 +150,13 @@ if __name__ == "__main__":
         type=int,
         default=6,
         help="Time window in months for considering dependencies (default: 6)",
+    )
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level (default: INFO)",
     )
     args = parser.parse_args()
     main(**vars(args))

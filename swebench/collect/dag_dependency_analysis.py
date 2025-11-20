@@ -592,10 +592,10 @@ def build_dependency_dag(
     pr_nodes.sort(key=lambda x: x.created_at, reverse=True)
     
     # Build commit to PR mapping
-    logger.info("Building commit-to-PR mapping...")
+    logger.error("Building commit-to-PR mapping...")
     pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
     commit_to_pr_map = build_commit_to_pr_map(pr_node_dict, repo_path)
-    logger.info(f"Mapped {len(commit_to_pr_map)} commits to {len(set(commit_to_pr_map.values()))} PRs")
+    logger.debug(f"Mapped {len(commit_to_pr_map)} commits to {len(set(commit_to_pr_map.values()))} PRs")
     
     if len(commit_to_pr_map) == 0:
         logger.warning("WARNING: commit_to_pr_map is empty! No blame-based dependencies will be detected.")
@@ -658,7 +658,7 @@ def build_dependency_dag(
                 blame_pct = blame_dependencies[candidate_pr.pr_number]
                 if blame_pct >= blame_threshold:
                     dag.add_edge(target_pr.pr_number, candidate_pr.pr_number, blame_pct)
-                    logger.info(f"  → Blame-based dependency on PR {candidate_pr.pr_number} ({blame_pct:.1%})")
+                    logger.debug(f"  → Blame-based dependency on PR {candidate_pr.pr_number} ({blame_pct:.1%})")
                     stats['blame_based'] += 1
                 else:
                     stats['blame_below_threshold'] += 1
