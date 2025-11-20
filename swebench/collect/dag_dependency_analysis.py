@@ -358,8 +358,11 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
         Dict mapping commit SHA to PR number
     """
     commit_to_pr = {}
+    prs_processed = 0
+    prs_with_commits = 0
     
     for pr_number, node in pr_nodes.items():
+        prs_processed += 1
         try:
             # Get all commits from base_commit to the PR's head
             # We use the task_instance to get the head commit
@@ -383,6 +386,7 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             assert result.returncode == 0, f"git log failed for PR {pr_number}: {result.stderr}"
             
             commits = result.stdout.strip().split('\n')
+            pr_commits = []
             for commit_sha in commits:
                 if not commit_sha:
                     continue
@@ -392,9 +396,21 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
                     continue
                     
                 commit_to_pr[commit_sha] = pr_number
+                pr_commits.append(commit_sha)
+            
+            if pr_commits:
+                prs_with_commits += 1
+                logger.debug(f"PR {pr_number}: Found {len(pr_commits)} commits")
+            else:
+                logger.warning(f"PR {pr_number}: No commits found between {node.base_commit[:8]}..{head_commit[:8]} (may be single-commit PR or base==head)")
         except Exception as e:
             logger.error(f"Failed to get commits for PR {pr_number}: {e}")
             continue
+    
+    logger.info(f"Commit-to-PR map stats: {prs_with_commits}/{prs_processed} PRs contributed commits, total {len(commit_to_pr)} commits mapped")
+    if prs_with_commits == 0:
+        logger.error(f"CRITICAL: No PRs contributed any commits! This will result in zero blame-based dependencies.")
+        logger.error(f"Possible causes: 1) head_commit == base_commit for all PRs, 2) git log range is empty")
     
     return commit_to_pr
 
