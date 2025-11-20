@@ -296,11 +296,59 @@ def git_blame_lines(
     except Exception as e:
         raise RuntimeError(f"Git blame failed for {file_path}:{start_line}-{end_line}: {e}") from e
 
+def _fetch_commit_if_missing(repo_path: str, commit_sha: str) -> bool:
+    """
+    Check if a commit exists in the repo, and fetch it from remote if missing.
+    
+    Args:
+        repo_path: Path to git repository
+        commit_sha: Commit SHA to check/fetch
+        
+    Returns:
+        True if commit exists or was successfully fetched, False otherwise
+    """
+    # Check if commit exists
+    check = subprocess.run(
+        ['git', 'cat-file', '-e', commit_sha],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=5
+    )
+    
+    if check.returncode == 0:
+        return True  # Commit already exists
+    
+    # Try to fetch the commit from origin
+    logger.debug(f"Fetching missing commit {commit_sha} from remote")
+    fetch = subprocess.run(
+        ['git', 'fetch', 'origin', commit_sha],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=30
+    )
+    
+    if fetch.returncode != 0:
+        logger.debug(f"Failed to fetch commit {commit_sha}: {fetch.stderr.strip()}")
+        return False
+    
+    # Verify it now exists
+    check = subprocess.run(
+        ['git', 'cat-file', '-e', commit_sha],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=5
+    )
+    
+    return check.returncode == 0
+
+
 def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[str, int]:
     """
     Build a mapping from commit SHA to PR number for all PRs.
     
     This uses git log to find all commits in each PR's history.
+    Fetches missing commits from remote if needed.
     
     Args:
         pr_nodes: All PR nodes in the DAG
@@ -317,6 +365,11 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
             # We use the task_instance to get the head commit
             head_commit = node.task_instance.get('head_commit')
             assert head_commit, f"PR {pr_number} missing head_commit"
+            
+            # Ensure both base and head commits exist, fetching if needed
+            for commit_sha, commit_type in [(node.base_commit, 'base'), (head_commit, 'head')]:
+                if not _fetch_commit_if_missing(repo_path, commit_sha):
+                    raise RuntimeError(f"{commit_type}_commit {commit_sha} not found in repo and couldn't be fetched")
             
             # Use git log to get all commits in this PR
             result = subprocess.run(
