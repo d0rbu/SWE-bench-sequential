@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import unidiff
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +360,7 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
     """
     commit_to_pr = {}
     
-    for pr_number, node in pr_nodes.items():
+    for pr_number, node in tqdm(pr_nodes.items(), desc="Building commit-to-PR map", leave=False):
         try:
             # Get all commits from base_commit to the PR's head
             # We use the task_instance to get the head commit
@@ -629,9 +630,7 @@ def build_dependency_dag(
         'blame_based': 0
     }
     
-    for i, target_pr in enumerate(pr_nodes):
-        if i % 100 == 0:
-            logger.info(f"Progress: Analyzed {i}/{len(pr_nodes)} PRs")
+    for i, target_pr in enumerate(tqdm(pr_nodes, desc="Analyzing PR dependencies", leave=False)):
         logger.debug(f"Analyzing dependencies for PR {target_pr.pr_number}")
         
         # Calculate blame dependencies for all earlier PRs
