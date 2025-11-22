@@ -38,8 +38,8 @@ class PRNode:
     created_at: datetime
     base_commit: str
     issues: Set[str]
-    modified_files: Set[str]
-    renamed_files: Dict[str, str]  # old_path -> new_path
+    modified_files_pre: Set[str]  # files before PR (deleted files, old names of renames)
+    modified_files_post: Set[str]  # files after PR (new files, new names of renames)
     task_instance: Dict[str, Any]
 
 
@@ -91,61 +91,86 @@ class DependencyDAG:
         return result
 
 
-def extract_renamed_files(patch_str: str) -> Dict[str, str]:
+def extract_modified_files_pre(patch_str: str) -> Set[str]:
     """
-    Extract file rename mappings from a patch.
+    Extract files that existed BEFORE the PR (pre-state).
     
-    Returns a dict mapping old file paths to new file paths for renamed files.
+    This includes:
+    - Files that were modified (existed before, still exist after)
+    - Files that were deleted (existed before, don't exist after)
+    - Old names of renamed files (existed before as old name)
+    
+    Excludes:
+    - Newly created files (didn't exist before)
     """
     if not patch_str or not patch_str.strip():
-        return {}
-    
-    renamed_files = {}
-    
-    try:
-        patch_set = unidiff.PatchSet(patch_str)
-        for patched_file in patch_set:
-            if patched_file.is_rename:
-                # Extract old and new paths, removing the a/ and b/ prefixes
-                old_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
-                new_path = patched_file.target_file[2:] if patched_file.target_file.startswith('b/') else patched_file.target_file
-                renamed_files[old_path] = new_path
-        return renamed_files
-    except Exception as e:
-        logger.warning(f"Failed to parse patch for renamed files with unidiff: {e}")
-        return {}
-
-
-def extract_modified_files(patch_str: str) -> Set[str]:
-    """Extract all modified file paths from a patch (including both old and new names for renames)."""
-    if not patch_str:
         return set()
     
-    files = set()
+    files_pre = set()
     
     try:
         patch_set = unidiff.PatchSet(patch_str)
         for patched_file in patch_set:
-            # For renamed files, include both old and new paths
-            if patched_file.is_rename:
+            if patched_file.is_added_file:
+                # Skip newly created files - they didn't exist before
+                continue
+            elif patched_file.is_removed_file:
+                # Deleted file - existed before
+                file_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
+                files_pre.add(file_path)
+            elif patched_file.is_rename:
+                # Renamed file - old name existed before
                 old_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
-                new_path = patched_file.target_file[2:] if patched_file.target_file.startswith('b/') else patched_file.target_file
-                files.add(old_path)
-                files.add(new_path)
+                files_pre.add(old_path)
             else:
-                files.add(patched_file.path)
-        return files
+                # Modified file - existed before
+                files_pre.add(patched_file.path)
+        return files_pre
     except Exception as e:
-        logger.warning(f"Failed to parse patch: {e}, falling back to manual parsing")
+        logger.warning(f"Failed to parse patch for pre-files with unidiff: {e}")
+        return set()
+
+
+def extract_modified_files_post(patch_str: str) -> Set[str]:
+    """
+    Extract files that exist AFTER the PR (post-state).
     
-    # Fallback
-    for line in patch_str.split('\n'):
-        if line.startswith('--- a/') or line.startswith('+++ b/'):
-            file_path = line[6:].strip()
-            if file_path and file_path != '/dev/null':
-                files.add(file_path)
+    This includes:
+    - Files that were modified (existed before, still exist after)
+    - Files that were created (didn't exist before, exist after)
+    - New names of renamed files (exist after as new name)
     
-    return files
+    Excludes:
+    - Files that were deleted (existed before, don't exist after)
+    """
+    if not patch_str or not patch_str.strip():
+        return set()
+    
+    files_post = set()
+    
+    try:
+        patch_set = unidiff.PatchSet(patch_str)
+        for patched_file in patch_set:
+            if patched_file.is_removed_file:
+                # Skip deleted files - they don't exist after
+                continue
+            elif patched_file.is_added_file:
+                # Created file - exists after
+                files_post.add(patched_file.path)
+            elif patched_file.is_rename:
+                # Renamed file - new name exists after
+                new_path = patched_file.target_file[2:] if patched_file.target_file.startswith('b/') else patched_file.target_file
+                files_post.add(new_path)
+            else:
+                # Modified file - exists after
+                files_post.add(patched_file.path)
+        return files_post
+    except Exception as e:
+        logger.warning(f"Failed to parse patch for post-files with unidiff: {e}")
+        return set()
+
+
+# Remove the old extract_modified_files function - replaced with pre/post functions above
 
 
 def calculate_file_overlap_weight(
@@ -153,58 +178,48 @@ def calculate_file_overlap_weight(
     candidate_pr: PRNode
 ) -> float:
     """
-    Calculate file overlap weight between two PRs.
+    Calculate file overlap weight between two PRs based on pre/post file states.
     
-    This considers:
-    1. Direct file overlap (files modified in both PRs)
-    2. Renamed files (if candidate renamed file.py to new_file.py,
-       and target modifies new_file.py, that's a dependency)
+    Dependencies are detected when:
+    1. Target PR modifies files that candidate PR also modified (pre->pre or post->post)
+    2. Target PR modifies files that candidate PR created (post->post)
+    3. Target PR modifies files that candidate PR deleted (pre->pre)
+    4. Target PR touches the post-state of files that candidate PR touched
     
     Args:
-        target_pr: The PR to analyze dependencies for
-        candidate_pr: A potential dependency PR
+        target_pr: The PR to analyze dependencies for (happens after candidate)
+        candidate_pr: A potential dependency PR (happens before target)
         
     Returns:
         Weight between 0.0 and 1.0 representing the strength of the file overlap
     """
-    # Get all files modified by target PR
-    target_files = target_pr.modified_files
+    # Get all files that target PR touches (both pre and post)
+    target_all_files = target_pr.modified_files_pre | target_pr.modified_files_post
     
-    if not target_files:
+    if not target_all_files:
         return 0.0
     
-    # Get files modified by candidate PR
-    candidate_files = candidate_pr.modified_files
+    overlapping_files = set()
     
-    # Check direct file overlap
-    overlapping_files = target_files & candidate_files
+    # Case 1: Target touches files that candidate also touched in their pre-state
+    # (Both PRs modify the same existing files)
+    overlapping_files.update(target_all_files & candidate_pr.modified_files_pre)
     
-    # Check if target PR modifies files that were renamed by candidate PR
-    # If candidate renamed old.py -> new.py, and target modifies new.py,
-    # that counts as overlap
-    for old_path, new_path in candidate_pr.renamed_files.items():
-        if new_path in target_files:
-            overlapping_files.add(new_path)
-    
-    # Check if target PR modifies files that candidate renamed FROM
-    # If candidate renamed old.py -> new.py, and target modifies old.py,
-    # that also counts (target depends on the pre-rename state)
-    for old_path, new_path in candidate_pr.renamed_files.items():
-        if old_path in target_files:
-            overlapping_files.add(old_path)
+    # Case 2: Target touches files that candidate created or renamed to
+    # (Target depends on candidate's new/renamed files)
+    overlapping_files.update(target_all_files & candidate_pr.modified_files_post)
     
     if not overlapping_files:
         return 0.0
     
     # Calculate weight as ratio of overlapping files to total files in target PR
-    weight = len(overlapping_files) / len(target_files)
+    weight = len(overlapping_files) / len(target_all_files)
     
     return weight
 
 
 def build_dependency_dag(
     task_instances: List[Dict[str, Any]],
-    repo_path: Optional[str] = None,
     time_window_months: int = 6,
     file_overlap_threshold: float = 0.0
 ) -> DependencyDAG:
@@ -222,7 +237,6 @@ def build_dependency_dag(
     
     Args:
         task_instances: List of task instance dictionaries
-        repo_path: Path to git repository (optional, kept for backward compatibility)
         time_window_months: Maximum age difference for dependencies (default: 6)
         file_overlap_threshold: Minimum file overlap weight for dependency (default: 0.0 = any overlap)
         
@@ -241,10 +255,10 @@ def build_dependency_dag(
         except:
             created_at = datetime.now()
         
-        # Parse patch to get modified files and renamed files
+        # Parse patch to get pre/post file states
         patch = instance.get('patch', '')
-        modified_files = extract_modified_files(patch)
-        renamed_files = extract_renamed_files(patch)
+        modified_files_pre = extract_modified_files_pre(patch)
+        modified_files_post = extract_modified_files_post(patch)
         
         # Extract issues
         issues = set(str(issue) for issue in instance.get('issue_numbers', []))
@@ -255,8 +269,8 @@ def build_dependency_dag(
             created_at=created_at,
             base_commit=instance.get('base_commit', ''),
             issues=issues,
-            modified_files=modified_files,
-            renamed_files=renamed_files,
+            modified_files_pre=modified_files_pre,
+            modified_files_post=modified_files_post,
             task_instance=instance
         )
         pr_nodes.append(node)
@@ -348,9 +362,9 @@ def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files
     Returns:
         Selected PR number that maximizes uncovered files
     """
-    # Calculate uncovered file counts for all PRs
+    # Calculate uncovered file counts for all PRs (using all files touched by PR)
     uncovered_counts = [
-        len(dag.nodes[pr].modified_files - covered_files) 
+        len((dag.nodes[pr].modified_files_pre | dag.nodes[pr].modified_files_post) - covered_files) 
         for pr in leaf_prs
     ]
     
@@ -457,7 +471,7 @@ def sample_chains_from_dag(
             node = dag.nodes[current_pr]
             chain.append(node.task_instance)
             used_prs.add(current_pr)
-            covered_files.update(node.modified_files)
+            covered_files.update(node.modified_files_pre | node.modified_files_post)
             
             # Follow strongest dependency
             deps = dag.get_dependencies(current_pr)

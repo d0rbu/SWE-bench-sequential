@@ -15,7 +15,6 @@ from swebench.collect.chain_construction import (
 def main(
     input_file: str,
     output_file: str,
-    repo_path: str = None,
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
@@ -32,7 +31,6 @@ def main(
     Args:
         input_file: Path to input JSONL file containing single task instances
         output_file: Path to output JSONL file for chains
-        repo_path: Path to git repository (optional, kept for backward compatibility)
         num_chains: Number of chains to build (default: 10)
         min_chain_length: Minimum length of chains to include (default: 2)
         max_chain_length: Maximum length of chains to create (default: 5)
@@ -60,9 +58,6 @@ def main(
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file not found: {input_file}")
     
-    if repo_path and not os.path.exists(repo_path):
-        raise FileNotFoundError(f"Repository path not found: {repo_path}")
-    
     # Create output directory if it doesn't exist
     output_dir = os.path.dirname(output_file)
     if output_dir and not os.path.exists(output_dir):
@@ -72,8 +67,6 @@ def main(
     print(f"Building chains from task instances...")
     print(f"  Input file: {input_file}")
     print(f"  Output file: {output_file}")
-    if repo_path:
-        print(f"  Repository: {repo_path}")
     print(f"  Configuration:")
     print(f"    - Number of chains: {num_chains}")
     print(f"    - Chain length: {min_chain_length}-{max_chain_length}")
@@ -84,7 +77,6 @@ def main(
     convert_single_instances_to_chains(
         input_file=input_file,
         output_file=output_file,
-        repo_path=repo_path,
         num_chains=num_chains,
         min_chain_length=min_chain_length,
         max_chain_length=max_chain_length,
@@ -116,12 +108,7 @@ if __name__ == "__main__":
         required=True,
         help="Path to output JSONL file for chains",
     )
-    parser.add_argument(
-        "--repo_path",
-        type=str,
-        default=None,
-        help="Path to git repository (optional, kept for backward compatibility)",
-    )
+# Removed --repo_path argument - no longer needed
     parser.add_argument(
         "--num_chains",
         type=int,
