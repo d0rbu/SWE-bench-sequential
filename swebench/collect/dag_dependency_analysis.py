@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import unidiff
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -360,7 +361,7 @@ def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[
     commit_to_pr = {}
     prs_with_no_commits = []
     
-    for pr_number, node in pr_nodes.items():
+    for pr_number, node in tqdm(pr_nodes.items(), desc="Building commit-to-PR map", leave=False):
         try:
             # Get all commits from base_commit to the PR's head
             # We use the task_instance to get the head commit
@@ -514,6 +515,7 @@ def calculate_blame_dependencies(
     pr_blame_counts = defaultdict(int)
     commits_in_map = 0
     commits_not_in_map = 0
+    commits_not_in_map_sample = []
     
     for commit_sha, line_count in blame_counter.items():
         # Look up which PR this commit belongs to
@@ -526,15 +528,31 @@ def calculate_blame_dependencies(
             pr_blame_counts[blamed_pr] += line_count
         else:
             commits_not_in_map += 1
+            # Collect sample of commits not in map for debugging
+            if len(commits_not_in_map_sample) < 5:
+                commits_not_in_map_sample.append(commit_sha)
     
     if commits_not_in_map > 0:
         logger.debug(f"PR {pr_node.pr_number}: {commits_in_map} commits found in map, {commits_not_in_map} not found (likely older PRs not in dataset)")
+        if commits_not_in_map_sample:
+            logger.debug(f"  Sample commits not in map: {', '.join(commits_not_in_map_sample[:5])}")
     
     # Stage 3: Normalize to percentages
     blame_percentages = {
         pr: count / total_lines
         for pr, count in pr_blame_counts.items()
     }
+    
+    # Log summary of blame dependencies found
+    if pr_blame_counts:
+        logger.debug(f"PR {pr_node.pr_number}: Found blame dependencies to {len(pr_blame_counts)} PRs")
+        # Log top 3 blame dependencies for visibility
+        top_deps = sorted(pr_blame_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        for dep_pr, count in top_deps:
+            pct = count / total_lines
+            logger.debug(f"  → PR {dep_pr}: {count}/{total_lines} lines ({pct:.1%})")
+    else:
+        logger.debug(f"PR {pr_node.pr_number}: No blame dependencies found (all blamed commits not in PR map)")
     
     return blame_percentages
 
@@ -627,9 +645,7 @@ def build_dependency_dag(
         'blame_based': 0
     }
     
-    for i, target_pr in enumerate(pr_nodes):
-        if i % 100 == 0:
-            logger.info(f"Progress: Analyzed {i}/{len(pr_nodes)} PRs")
+    for i, target_pr in enumerate(tqdm(pr_nodes, desc="Analyzing PR dependencies", leave=False)):
         logger.debug(f"Analyzing dependencies for PR {target_pr.pr_number}")
         
         # Calculate blame dependencies for all earlier PRs
@@ -784,11 +800,32 @@ def sample_chains_from_dag(
     # Get PRs in topological order (dependencies first)
     topo_order = dag.get_topological_order()
     
-    # Start from PRs with no dependencies (leaf nodes in dep sense)
-    leaf_prs = [pr for pr in topo_order if not dag.get_dependencies(pr)]
+    # Helper to check if a PR has any incoming edges (dependents)
+    def has_incoming_edges(pr: int) -> bool:
+        for pr_edges in dag.edges.values():
+            if pr in pr_edges:
+                return True
+        return False
     
-    for _ in range(num_chains):
+    # Filter to PRs with at least one edge (incoming or outgoing)
+    # This excludes isolated nodes that can't form chains of min_chain_length >= 2
+    connected_prs = [
+        pr for pr in topo_order 
+        if dag.get_dependencies(pr) or has_incoming_edges(pr)
+    ]
+    
+    logger.info(f"Chain sampling: {len(connected_prs)}/{len(topo_order)} PRs have at least one edge")
+    
+    if not connected_prs:
+        logger.warning("No connected PRs found in DAG - cannot sample chains")
+        return []
+    
+    # Start from PRs with no dependencies (leaf nodes in dep sense) that are connected
+    leaf_prs = [pr for pr in connected_prs if not dag.get_dependencies(pr)]
+    
+    for i in range(num_chains):
         if not leaf_prs:
+            logger.info(f"Stopped sampling after {i} chains - no more leaf PRs available")
             break
         
         # Use the injected sampler to pick starting PR
@@ -818,6 +855,12 @@ def sample_chains_from_dag(
         if len(chain) >= min_chain_length:
             # Reverse so it goes from oldest to newest (dependency order)
             chains.append(list(reversed(chain)))
-            logger.info(f"Sampled chain: {[inst['pull_number'] for inst in chain]}")
+            logger.info(f"Sampled chain {len(chains)}: {[inst['pull_number'] for inst in reversed(chain)]}")
+        else:
+            logger.debug(f"Chain from PR {best_pr} too short ({len(chain)} < {min_chain_length})")
+    
+    if not chains:
+        logger.warning(f"Failed to sample any chains meeting min_chain_length={min_chain_length}")
+        logger.warning(f"  Total PRs: {len(dag.nodes)}, Connected PRs: {len(connected_prs)}, Leaf PRs: {len(leaf_prs)}")
     
     return chains
