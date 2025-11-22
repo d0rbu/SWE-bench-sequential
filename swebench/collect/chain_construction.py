@@ -416,9 +416,9 @@ def validate_chain_id(chain_id: str) -> bool:
 
 def build_chains_from_repository_data(
     task_instances: List[Dict[str, Any]],
-    repo_path: str,
+    repo_path: Optional[str] = None,
     time_window_months: int = 6,
-    blame_threshold: float = 0.1,
+    file_overlap_threshold: float = 0.0,
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
@@ -429,16 +429,15 @@ def build_chains_from_repository_data(
     Build chains from task instances using DAG-based dependency analysis.
 
     This performs sophisticated dependency detection through:
-    - Git blame analysis on modified/deleted lines
+    - File overlap detection (including renamed files)
     - Temporal proximity filtering
     - Issue relationship matching
-    - File overlap detection
 
     Args:
         task_instances: List of task instance dictionaries
-        repo_path: Path to git repository for blame analysis (required)
+        repo_path: Path to git repository (optional, kept for backward compatibility)
         time_window_months: Maximum age difference for dependencies (default: 6)
-        blame_threshold: Minimum blame % for dependency (default: 0.1 = 10%)
+        file_overlap_threshold: Minimum file overlap weight for dependency (default: 0.0 = any overlap)
         num_chains: Number of chains to sample from DAG
         min_chain_length: Minimum chain length
         max_chain_length: Maximum chain length
@@ -459,7 +458,7 @@ def build_chains_from_repository_data(
         task_instances,
         repo_path=repo_path,
         time_window_months=time_window_months,
-        blame_threshold=blame_threshold,
+        file_overlap_threshold=file_overlap_threshold,
     )
 
     logger.info(
@@ -520,7 +519,7 @@ def load_chains_from_jsonl(input_file: str) -> List[Chain]:
 
 
 def convert_single_instances_to_chains(
-    input_file: str, output_file: str, repo_path: str, **kwargs
+    input_file: str, output_file: str, repo_path: Optional[str] = None, **kwargs
 ) -> None:
     """
     Convert a JSONL file of single task instances to chains using DAG-based analysis.
@@ -528,7 +527,7 @@ def convert_single_instances_to_chains(
     Args:
         input_file: Path to input JSONL file with single instances
         output_file: Path to output JSONL file with chains
-        repo_path: Path to git repository for blame analysis (required)
+        repo_path: Path to git repository (optional, kept for backward compatibility)
         **kwargs: Additional arguments to pass to build_chains_from_repository_data
     """
     # Load single instances
