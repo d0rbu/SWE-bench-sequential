@@ -108,7 +108,6 @@ if __name__ == "__main__":
         required=True,
         help="Path to output JSONL file for chains",
     )
-# Removed --repo_path argument - no longer needed
     parser.add_argument(
         "--num_chains",
         type=int,
