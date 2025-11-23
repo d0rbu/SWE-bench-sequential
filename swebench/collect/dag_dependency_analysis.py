@@ -170,9 +170,6 @@ def extract_modified_files_post(patch_str: str) -> Set[str]:
         return set()
 
 
-# Remove the old extract_modified_files function - replaced with pre/post functions above
-
-
 def calculate_file_overlap_weight(
     target_pr: PRNode,
     candidate_pr: PRNode
