@@ -2,10 +2,9 @@
 DAG-based dependency analysis for PR chains.
 
 This module implements sophisticated dependency detection between PRs using:
-- Git blame analysis on modified/deleted lines
+- File overlap detection (including handling of renamed files)
 - Temporal proximity filtering  
 - Issue relationship matching
-- File overlap detection
 
 The result is a Directed Acyclic Graph (DAG) of dependencies from which
 diverse chains can be sampled.
@@ -15,13 +14,10 @@ import logging
 import os
 import random
 import re
-import subprocess
-import tempfile
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import unidiff
 from tqdm import tqdm
@@ -42,8 +38,8 @@ class PRNode:
     created_at: datetime
     base_commit: str
     issues: Set[str]
-    modified_files: Set[str]
-    modified_deleted_lines: Dict[str, Set[int]]  # file -> line numbers
+    modified_files_pre: Set[str]  # files before PR (deleted files, old names of renames)
+    modified_files_post: Set[str]  # files after PR (new files, new names of renames)
     task_instance: Dict[str, Any]
 
 
@@ -95,499 +91,147 @@ class DependencyDAG:
         return result
 
 
-def parse_patch_for_modified_deleted_lines(patch_str: str) -> Dict[str, Set[int]]:
+def extract_modified_files_pre(patch_str: str) -> Set[str]:
     """
-    Parse unified diff to extract modified/deleted line numbers.
+    Extract files that existed BEFORE the PR (pre-state).
     
-    Returns a dict mapping file paths to line numbers that were modified/deleted.
-    For renamed files, uses the SOURCE (old) filename since that's what exists at base_commit.
+    This includes:
+    - Files that were modified (existed before, still exist after)
+    - Files that were deleted (existed before, don't exist after)
+    - Old names of renamed files (existed before as old name)
     
-    NOTE: We explicitly exclude added lines - they can't have prior blame.
-    NOTE: We skip newly created files - they have no prior history to blame.
+    Excludes:
+    - Newly created files (didn't exist before)
     """
     if not patch_str or not patch_str.strip():
-        return {}
-    
-    result = defaultdict(set)
-    
-    try:
-        patch_set = unidiff.PatchSet(patch_str)
-        for patched_file in patch_set:
-            # Skip new files (they have no prior history to blame)
-            if patched_file.is_added_file:
-                continue
-            
-            # For renamed files, use the source (old) filename for blame
-            # since that's what exists at the base commit
-            if patched_file.is_rename:
-                file_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
-            else:
-                file_path = patched_file.path
-            for hunk in patched_file:
-                for line in hunk:
-                    # Only removed lines (is_removed = True)
-                    # Modified lines don't exist in unidiff - they're remove+add
-                    if line.is_removed and line.source_line_no:
-                        result[file_path].add(line.source_line_no)
-        return dict(result)
-    except Exception as e:
-        logger.warning(f"Failed to parse patch with unidiff: {e}, falling back to manual parsing")
-        
-    # Fallback manual parsing
-    result.clear()
-    current_file = None
-    is_new_file = False
-    source_line = 1
-    
-    for line in patch_str.split('\n'):
-        if line.startswith('--- '):
-            current_file = None
-            is_new_file = False
-            # Check if this is a new file (--- /dev/null)
-            if line.startswith('--- /dev/null'):
-                is_new_file = True
-            elif line.startswith('--- a/'):
-                # Use source filename (this is what exists at base commit)
-                current_file = line[6:].strip()
-        elif line.startswith('+++ b/'):
-            if is_new_file:
-                # This is a new file, skip it
-                current_file = None
-                continue
-            # For renamed files, current_file is already set to source filename
-            # Only update if we don't have a source filename yet
-            if not current_file:
-                current_file = line[6:].strip()
-        elif line.startswith('@@'):
-            match = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', line)
-            if match:
-                source_line = int(match.group(1))
-                # If source line is 0, this is a new file
-                if source_line == 0:
-                    current_file = None
-        elif current_file and line.startswith('-') and not line.startswith('---'):
-            # Deleted line - record it
-            result[current_file].add(source_line)
-            source_line += 1
-        elif current_file and not line.startswith('+'):
-            # Context line
-            source_line += 1
-    
-    return dict(result)
-
-
-def extract_modified_files(patch_str: str) -> Set[str]:
-    """Extract modified file paths from a patch."""
-    if not patch_str:
         return set()
     
-    files = set()
+    files_pre = set()
     
     try:
         patch_set = unidiff.PatchSet(patch_str)
         for patched_file in patch_set:
-            files.add(patched_file.path)
-        return files
+            if patched_file.is_added_file:
+                # Skip newly created files - they didn't exist before
+                continue
+            elif patched_file.is_removed_file:
+                # Deleted file - existed before
+                file_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
+                files_pre.add(file_path)
+            elif patched_file.is_rename:
+                # Renamed file - old name existed before
+                old_path = patched_file.source_file[2:] if patched_file.source_file.startswith('a/') else patched_file.source_file
+                files_pre.add(old_path)
+            else:
+                # Modified file - existed before
+                files_pre.add(patched_file.path)
+        return files_pre
     except Exception as e:
-        logger.warning(f"Failed to parse patch: {e}, falling back to manual parsing")
-    
-    # Fallback
-    for line in patch_str.split('\n'):
-        if line.startswith('--- a/') or line.startswith('+++ b/'):
-            files.add(line[6:].strip())
-    
-    return files
+        logger.warning(f"Failed to parse patch for pre-files with unidiff: {e}")
+        return set()
 
 
-def is_valid_commit_sha(commit_sha: str) -> bool:
+def extract_modified_files_post(patch_str: str) -> Set[str]:
     """
-    Validate that a string is a valid git commit SHA.
-    Accepts both full (40 chars) and abbreviated (7-40 chars) SHAs.
+    Extract files that exist AFTER the PR (post-state).
     
-    Args:
-        commit_sha: String to validate
-        
-    Returns:
-        True if valid commit SHA, False otherwise
-    """
-    # Git abbreviated SHAs are typically 7-11 characters, but can be up to 40
-    # Accept any hex string between 7 and 40 characters
-    return 7 <= len(commit_sha) <= 40 and all(c in '0123456789abcdef' for c in commit_sha.lower())
-
-
-def git_blame_lines(
-    repo_path: str, 
-    file_path: str, 
-    commit: str, 
-    start_line: int, 
-    end_line: int | None = None
-) -> Dict[int, str]:
-    """
-    Run git blame to find which commits last modified a range of lines.
+    This includes:
+    - Files that were modified (existed before, still exist after)
+    - Files that were created (didn't exist before, exist after)
+    - New names of renamed files (exist after as new name)
     
-    Args:
-        repo_path: Path to git repository
-        file_path: Relative path to file within repo
-        commit: Commit SHA to blame at (typically base_commit of the PR)
-        start_line: Starting line number (1-indexed)
-        end_line: Ending line number (1-indexed), or None to blame just start_line
-        
-    Returns:
-        Dict mapping line numbers to commit SHAs
-        
-    Raises:
-        RuntimeError: If git blame fails
+    Excludes:
+    - Files that were deleted (existed before, don't exist after)
     """
-    if end_line is None:
-        end_line = start_line
+    if not patch_str or not patch_str.strip():
+        return set()
+    
+    files_post = set()
     
     try:
-        # Use git blame with -L to blame line range
-        result = subprocess.run(
-            ['git', 'blame', '-L', f'{start_line},{end_line}', commit, '--', file_path],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode != 0:
-            # Check if error is due to file not existing at this commit
-            stderr = result.stderr.strip()
-            if "no such path" in stderr or "does not exist" in stderr:
-                raise RuntimeError(
-                    f"File {file_path} does not exist at commit {commit}"
-                )
-            raise RuntimeError(
-                f"Git blame failed for {file_path}:{start_line}-{end_line}: {stderr}"
-            )
-        
-        # Parse output: "commit_sha (author date time linenum) line content"
-        output = result.stdout.strip()
-        if not output:
-            raise RuntimeError(
-                f"Git blame returned empty output for {file_path}:{start_line}-{end_line}"
-            )
-        
-        blame_map = {}
-        for line in output.split('\n'):
-            if not line:
+        patch_set = unidiff.PatchSet(patch_str)
+        for patched_file in patch_set:
+            if patched_file.is_removed_file:
+                # Skip deleted files - they don't exist after
                 continue
-            # Extract commit SHA (first token)
-            commit_sha = line.split()[0]
-            # Remove leading ^ if present (means line existed in initial commit)
-            commit_sha = commit_sha.lstrip('^')
-            
-            # Validate commit SHA format (accept both full and abbreviated SHAs)
-            if not is_valid_commit_sha(commit_sha):
-                logger.warning(f"Skipping invalid commit SHA format: {commit_sha}")
-                continue
-            
-            # Extract line number from blame output
-            # Format: "commit_sha (author date time linenum) line content"
-            match = re.search(r'\(.*?\s+(\d+)\)', line)
-            if match:
-                line_num = int(match.group(1))
-                blame_map[line_num] = commit_sha
-        
-        return blame_map
-        
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"Git blame timed out for {file_path}:{start_line}-{end_line}") from e
+            elif patched_file.is_added_file:
+                # Created file - exists after
+                files_post.add(patched_file.path)
+            elif patched_file.is_rename:
+                # Renamed file - new name exists after
+                new_path = patched_file.target_file[2:] if patched_file.target_file.startswith('b/') else patched_file.target_file
+                files_post.add(new_path)
+            else:
+                # Modified file - exists after
+                files_post.add(patched_file.path)
+        return files_post
     except Exception as e:
-        raise RuntimeError(f"Git blame failed for {file_path}:{start_line}-{end_line}: {e}") from e
+        logger.warning(f"Failed to parse patch for post-files with unidiff: {e}")
+        return set()
 
-def _fetch_commit_if_missing(repo_path: str, commit_sha: str) -> bool:
+
+def calculate_file_overlap_weight(
+    target_pr: PRNode,
+    candidate_pr: PRNode
+) -> float:
     """
-    Check if a commit exists in the repo, and fetch it from remote if missing.
+    Calculate file overlap weight between two PRs based on pre/post file states.
+    
+    Dependencies are detected when:
+    1. Target PR modifies files that candidate PR also modified (pre->pre or post->post)
+    2. Target PR modifies files that candidate PR created (post->post)
+    3. Target PR modifies files that candidate PR deleted (pre->pre)
+    4. Target PR touches the post-state of files that candidate PR touched
     
     Args:
-        repo_path: Path to git repository
-        commit_sha: Commit SHA to check/fetch
+        target_pr: The PR to analyze dependencies for (happens after candidate)
+        candidate_pr: A potential dependency PR (happens before target)
         
     Returns:
-        True if commit exists or was successfully fetched, False otherwise
+        Weight between 0.0 and 1.0 representing the strength of the file overlap
     """
-    # Check if commit exists
-    check = subprocess.run(
-        ['git', 'cat-file', '-e', commit_sha],
-        cwd=repo_path,
-        capture_output=True,
-        timeout=5
-    )
-    
-    if check.returncode == 0:
-        return True  # Commit already exists
-    
-    # Try to fetch the commit from origin
-    logger.debug(f"Fetching missing commit {commit_sha} from remote")
-    fetch = subprocess.run(
-        ['git', 'fetch', 'origin', commit_sha],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        timeout=30
-    )
-    
-    if fetch.returncode != 0:
-        logger.debug(f"Failed to fetch commit {commit_sha}: {fetch.stderr.strip()}")
-        return False
-    
-    # Verify it now exists
-    check = subprocess.run(
-        ['git', 'cat-file', '-e', commit_sha],
-        cwd=repo_path,
-        capture_output=True,
-        timeout=5
-    )
-    
-    return check.returncode == 0
+    # Get all pre-existing files that target PR touched
+    target_files = target_pr.modified_files_pre
 
+    if not target_files:
+        return 0.0
 
-def build_commit_to_pr_map(pr_nodes: Dict[int, PRNode], repo_path: str) -> Dict[str, int]:
-    """
-    Build a mapping from commit SHA to PR number for all PRs.
+    overlapping_files = target_files & candidate_pr.modified_files_post
     
-    This uses git log to find all commits in each PR's history.
-    Fetches missing commits from remote if needed.
+    if not overlapping_files:
+        return 0.0
     
-    Args:
-        pr_nodes: All PR nodes in the DAG
-        repo_path: Path to git repository
-        
-    Returns:
-        Dict mapping commit SHA to PR number
-    """
-    commit_to_pr = {}
-    prs_with_no_commits = []
+    # Calculate weight as ratio of overlapping files to total modified pre-existing files in target PR
+    weight = len(overlapping_files) / len(target_files)
     
-    for pr_number, node in tqdm(pr_nodes.items(), desc="Building commit-to-PR map", leave=False):
-        try:
-            # Get all commits from base_commit to the PR's head
-            # We use the task_instance to get the head commit
-            head_commit = node.task_instance.get('head_commit')
-            assert head_commit, f"PR {pr_number} missing head_commit"
-            
-            logger.debug(f"PR {pr_number}: base={node.base_commit[:8]}, head={head_commit[:8]}")
-            
-            # Ensure both base and head commits exist, fetching if needed
-            for commit_sha, commit_type in [(node.base_commit, 'base'), (head_commit, 'head')]:
-                if not _fetch_commit_if_missing(repo_path, commit_sha):
-                    raise RuntimeError(f"{commit_type}_commit {commit_sha} not found in repo and couldn't be fetched")
-            
-            # Use git log to get all commits in this PR
-            result = subprocess.run(
-                ['git', 'log', '--format=%H', f'{node.base_commit}..{head_commit}'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            assert result.returncode == 0, f"git log failed for PR {pr_number}: {result.stderr}"
-            
-            commits = result.stdout.strip().split('\n')
-            commit_count = 0
-            for commit_sha in commits:
-                if not commit_sha:
-                    continue
-                    
-                if not is_valid_commit_sha(commit_sha):
-                    logger.error(f"Invalid commit SHA format in PR {pr_number}: {commit_sha}")
-                    continue
-                    
-                commit_to_pr[commit_sha] = pr_number
-                commit_count += 1
-            
-            if commit_count == 0:
-                prs_with_no_commits.append(pr_number)
-                logger.warning(f"PR {pr_number}: Found 0 commits between base and head!")
-            else:
-                logger.debug(f"PR {pr_number}: Found {commit_count} commits")
-                
-        except Exception as e:
-            logger.error(f"Failed to get commits for PR {pr_number}: {e}")
-            continue
-    
-    if prs_with_no_commits:
-        logger.warning(f"WARNING: {len(prs_with_no_commits)}/{len(pr_nodes)} PRs have no commits between base and head: {prs_with_no_commits[:10]}{'...' if len(prs_with_no_commits) > 10 else ''}")
-    
-    return commit_to_pr
-
-
-def build_blame_counter_for_pr(
-    pr_node: PRNode,
-    repo_path: str
-) -> Tuple[Counter[str], int]:
-    """
-    Build a counter of commit SHAs for all modified/deleted lines in a PR.
-    
-    This runs git blame once for each file (or contiguous line ranges) and aggregates
-    the results into a counter showing how many lines blame to each commit.
-    
-    Args:
-        pr_node: PR node to analyze
-        repo_path: Path to git repository
-        
-    Returns:
-        Tuple of (Counter mapping commit SHA to line count, total lines analyzed)
-    """
-    blame_counter = Counter()
-    total_lines = 0
-    
-    # For each file with modified/deleted lines
-    for file_path, line_nums in pr_node.modified_deleted_lines.items():
-        if not line_nums:
-            continue
-        
-        # Convert set to sorted list for range grouping
-        sorted_lines = sorted(line_nums)
-        total_lines += len(sorted_lines)
-        
-        # Group consecutive lines into ranges for efficient git blame
-        ranges = []
-        start = sorted_lines[0]
-        end = sorted_lines[0]
-        
-        for line_num in sorted_lines[1:]:
-            if line_num == end + 1:
-                # Extend current range
-                end = line_num
-            else:
-                # Save current range and start new one
-                ranges.append((start, end))
-                start = line_num
-                end = line_num
-        ranges.append((start, end))
-        
-        # Run git blame for each range
-        for start_line, end_line in ranges:
-            try:
-                blame_map = git_blame_lines(
-                    repo_path,
-                    file_path,
-                    pr_node.base_commit,
-                    start_line,
-                    end_line
-                )
-                # Count commits
-                for commit_sha in blame_map.values():
-                    blame_counter[commit_sha] += 1
-            except RuntimeError as e:
-                logger.warning(f"Failed to blame {file_path}:{start_line}-{end_line} for PR {pr_node.pr_number}: {e}")
-                continue
-    
-    return blame_counter, total_lines
-
-
-def calculate_blame_dependencies(
-    pr_node: PRNode,
-    all_pr_nodes: Dict[int, PRNode],
-    repo_path: str,
-    commit_to_pr_map: Dict[str, int]
-) -> Dict[int, float]:
-    """
-    Calculate blame-based dependencies for a PR against all other PRs.
-    
-    This uses a two-stage approach for efficiency:
-    1. Build blame counter for all modified/deleted lines in the PR (once)
-    2. Aggregate blame counts by PR and normalize to percentages
-    
-    Args:
-        pr_node: PR to analyze dependencies for
-        all_pr_nodes: All PR nodes in the DAG
-        repo_path: Path to git repository
-        commit_to_pr_map: Mapping of commit SHAs to PR numbers
-        
-    Returns:
-        Dict mapping PR numbers to blame dependency percentages (0.0 to 1.0)
-    """
-    # Stage 1: Build blame counter for this PR
-    blame_counter, total_lines = build_blame_counter_for_pr(pr_node, repo_path)
-    
-    if total_lines == 0:
-        logger.debug(f"PR {pr_node.pr_number}: No modified/deleted lines to blame")
-        return {}
-    
-    logger.debug(f"PR {pr_node.pr_number}: Blamed {total_lines} lines to {len(blame_counter)} unique commits")
-    
-    # Stage 2: Aggregate blame counts by PR
-    pr_blame_counts = defaultdict(int)
-    commits_in_map = 0
-    commits_not_in_map = 0
-    commits_not_in_map_sample = []
-    
-    for commit_sha, line_count in blame_counter.items():
-        # Look up which PR this commit belongs to
-        if commit_sha in commit_to_pr_map:
-            commits_in_map += 1
-            blamed_pr = commit_to_pr_map[commit_sha]
-            # This should never happen - blame is done at base commit
-            assert blamed_pr != pr_node.pr_number, \
-                f"PR {pr_node.pr_number} blamed to itself for commit {commit_sha}"
-            pr_blame_counts[blamed_pr] += line_count
-        else:
-            commits_not_in_map += 1
-            # Collect sample of commits not in map for debugging
-            if len(commits_not_in_map_sample) < 5:
-                commits_not_in_map_sample.append(commit_sha)
-    
-    if commits_not_in_map > 0:
-        logger.debug(f"PR {pr_node.pr_number}: {commits_in_map} commits found in map, {commits_not_in_map} not found (likely older PRs not in dataset)")
-        if commits_not_in_map_sample:
-            logger.debug(f"  Sample commits not in map: {', '.join(commits_not_in_map_sample[:5])}")
-    
-    # Stage 3: Normalize to percentages
-    blame_percentages = {
-        pr: count / total_lines
-        for pr, count in pr_blame_counts.items()
-    }
-    
-    # Log summary of blame dependencies found
-    if pr_blame_counts:
-        logger.debug(f"PR {pr_node.pr_number}: Found blame dependencies to {len(pr_blame_counts)} PRs")
-        # Log top 3 blame dependencies for visibility
-        top_deps = sorted(pr_blame_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-        for dep_pr, count in top_deps:
-            pct = count / total_lines
-            logger.debug(f"  → PR {dep_pr}: {count}/{total_lines} lines ({pct:.1%})")
-    else:
-        logger.debug(f"PR {pr_node.pr_number}: No blame dependencies found (all blamed commits not in PR map)")
-    
-    return blame_percentages
+    return weight
 
 
 def build_dependency_dag(
     task_instances: List[Dict[str, Any]],
-    repo_path: str,
     time_window_months: int = 6,
-    blame_threshold: float = 0.05
+    file_overlap_threshold: float = 0.0
 ) -> DependencyDAG:
     """
-    Build a dependency DAG from task instances using git blame analysis.
+    Build a dependency DAG from task instances using file overlap analysis.
     
     Algorithm:
     1. Sort PRs by date (newest to oldest)
     2. For each PR, examine all earlier PRs:
-       a. Same issue → automatic dependency
+       a. Same issue → automatic dependency (weight 1.0)
        b. >6 months old → skip
        c. No file overlap → skip  
-       d. Otherwise → calculate blame percentage
-       e. If blame % > threshold → add dependency
+       d. Otherwise → calculate file overlap weight
+       e. If overlap weight > threshold → add dependency
     
     Args:
         task_instances: List of task instance dictionaries
-        repo_path: Path to git repository for blame analysis (required)
         time_window_months: Maximum age difference for dependencies (default: 6)
-        blame_threshold: Minimum blame percentage for dependency (default: 0.05 = 5%)
+        file_overlap_threshold: Minimum file overlap weight for dependency (default: 0.0 = any overlap)
         
     Returns:
         DependencyDAG with nodes and weighted edges
     """
-    # Assert repo_path is provided and exists
-    assert repo_path, "repo_path must be provided"
-    assert os.path.exists(repo_path), f"repo_path does not exist: {repo_path}"
-    
     dag = DependencyDAG()
     
     # Parse task instances into PR nodes
@@ -600,10 +244,10 @@ def build_dependency_dag(
         except:
             created_at = datetime.now()
         
-        # Parse patch to get modified files and lines
+        # Parse patch to get pre/post file states
         patch = instance.get('patch', '')
-        modified_files = extract_modified_files(patch)
-        modified_deleted_lines = parse_patch_for_modified_deleted_lines(patch)
+        modified_files_pre = extract_modified_files_pre(patch)
+        modified_files_post = extract_modified_files_post(patch)
         
         # Extract issues
         issues = set(str(issue) for issue in instance.get('issue_numbers', []))
@@ -614,8 +258,8 @@ def build_dependency_dag(
             created_at=created_at,
             base_commit=instance.get('base_commit', ''),
             issues=issues,
-            modified_files=modified_files,
-            modified_deleted_lines=modified_deleted_lines,
+            modified_files_pre=modified_files_pre,
+            modified_files_post=modified_files_post,
             task_instance=instance
         )
         pr_nodes.append(node)
@@ -624,38 +268,19 @@ def build_dependency_dag(
     # Sort by date (newest first)
     pr_nodes.sort(key=lambda x: x.created_at, reverse=True)
     
-    # Build commit to PR mapping
-    logger.error("Building commit-to-PR mapping...")
-    pr_node_dict = {pr.pr_number: pr for pr in pr_nodes}
-    commit_to_pr_map = build_commit_to_pr_map(pr_node_dict, repo_path)
-    logger.debug(f"Mapped {len(commit_to_pr_map)} commits to {len(set(commit_to_pr_map.values()))} PRs")
-    
-    if len(commit_to_pr_map) == 0:
-        logger.warning("WARNING: commit_to_pr_map is empty! No blame-based dependencies will be detected.")
-    
     # Process each PR against all earlier PRs
     stats = {
         'total_comparisons': 0,
         'filtered_time': 0,
-        'filtered_no_issues': 0,
         'filtered_no_file_overlap': 0,
         'issue_based': 0,
-        'blame_checked': 0,
-        'blame_below_threshold': 0,
-        'blame_based': 0
+        'file_overlap_checked': 0,
+        'file_overlap_below_threshold': 0,
+        'file_overlap_based': 0
     }
     
     for i, target_pr in enumerate(tqdm(pr_nodes, desc="Analyzing PR dependencies", leave=False)):
         logger.debug(f"Analyzing dependencies for PR {target_pr.pr_number}")
-        
-        # Calculate blame dependencies for all earlier PRs
-        blame_dependencies = calculate_blame_dependencies(
-            target_pr,
-            pr_node_dict,
-            repo_path,
-            commit_to_pr_map
-        )
-        logger.debug(f"  Found {len(blame_dependencies)} PRs with blame dependencies")
         
         # Look at all earlier PRs (later in list due to reverse sort)
         candidates_in_window = 0
@@ -678,22 +303,19 @@ def build_dependency_dag(
                     stats['issue_based'] += 1
                     continue
             
-            # Filter 3: Check for file overlap
-            if not (target_pr.modified_files & candidate_pr.modified_files):
-                stats['filtered_no_file_overlap'] += 1
-                continue
+            # Filter 3: Calculate file overlap weight
+            stats['file_overlap_checked'] += 1
+            overlap_weight = calculate_file_overlap_weight(target_pr, candidate_pr)
             
-            # Check if we have blame dependency for this candidate
-            stats['blame_checked'] += 1
-            if candidate_pr.pr_number in blame_dependencies:
-                blame_pct = blame_dependencies[candidate_pr.pr_number]
-                if blame_pct >= blame_threshold:
-                    dag.add_edge(target_pr.pr_number, candidate_pr.pr_number, blame_pct)
-                    logger.debug(f"  → Blame-based dependency on PR {candidate_pr.pr_number} ({blame_pct:.1%})")
-                    stats['blame_based'] += 1
-                else:
-                    stats['blame_below_threshold'] += 1
-                    logger.debug(f"  Blame dependency on PR {candidate_pr.pr_number} below threshold: {blame_pct:.1%}")
+            if overlap_weight > file_overlap_threshold:
+                dag.add_edge(target_pr.pr_number, candidate_pr.pr_number, overlap_weight)
+                logger.debug(f"  → File overlap dependency on PR {candidate_pr.pr_number} (weight: {overlap_weight:.2f})")
+                stats['file_overlap_based'] += 1
+            elif overlap_weight > 0:
+                stats['file_overlap_below_threshold'] += 1
+                logger.debug(f"  File overlap with PR {candidate_pr.pr_number} below threshold: {overlap_weight:.2f}")
+            else:
+                stats['filtered_no_file_overlap'] += 1
         
         if candidates_in_window > 0:
             logger.debug(f"  Checked {candidates_in_window} candidates within time window")
@@ -705,10 +327,9 @@ def build_dependency_dag(
     logger.info(f"  Filtered by time window: {stats['filtered_time']:,}")
     logger.info(f"  Filtered by no file overlap: {stats['filtered_no_file_overlap']:,}")
     logger.info(f"  Issue-based dependencies found: {stats['issue_based']}")
-    logger.info(f"  Blame checks performed: {stats['blame_checked']:,}")
-    logger.info(f"  Blame-based dependencies found: {stats['blame_based']}")
-    logger.info(f"  Blame below threshold: {stats['blame_below_threshold']:,}")
-    logger.info(f"  Commit-to-PR map size: {len(commit_to_pr_map):,} commits")
+    logger.info(f"  File overlap checks performed: {stats['file_overlap_checked']:,}")
+    logger.info(f"  File overlap-based dependencies found: {stats['file_overlap_based']}")
+    logger.info(f"  File overlap below threshold: {stats['file_overlap_below_threshold']:,}")
     logger.info("="*60 + "\n")
     
     return dag
@@ -730,9 +351,9 @@ def file_coverage_sampler(leaf_prs: List[int], dag: DependencyDAG, covered_files
     Returns:
         Selected PR number that maximizes uncovered files
     """
-    # Calculate uncovered file counts for all PRs
+    # Calculate uncovered file counts for all PRs (using all files touched by PR)
     uncovered_counts = [
-        len(dag.nodes[pr].modified_files - covered_files) 
+        len((dag.nodes[pr].modified_files_pre | dag.nodes[pr].modified_files_post) - covered_files) 
         for pr in leaf_prs
     ]
     
@@ -839,7 +460,7 @@ def sample_chains_from_dag(
             node = dag.nodes[current_pr]
             chain.append(node.task_instance)
             used_prs.add(current_pr)
-            covered_files.update(node.modified_files)
+            covered_files.update(node.modified_files_pre | node.modified_files_post)
             
             # Follow strongest dependency
             deps = dag.get_dependencies(current_pr)
