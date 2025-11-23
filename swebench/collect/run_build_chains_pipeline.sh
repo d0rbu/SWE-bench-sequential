@@ -114,11 +114,10 @@ echo "     - Time window: 6 months"
 uv run python build_chains_pipeline.py \
     --input_file "$TASKS_FILE" \
     --output_file "$CHAINS_FILE" \
-    --repo_path "$REPO_PATH" \
     --num_chains 10 \
     --min_chain_length 2 \
     --max_chain_length 5 \
-    --blame_threshold 0.05 \
+    --file_overlap_threshold 0.00 \
     --time_window_months 144 \
     --log_level DEBUG
 
