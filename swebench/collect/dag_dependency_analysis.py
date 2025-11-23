@@ -196,7 +196,7 @@ def calculate_file_overlap_weight(
     if not target_files:
         return 0.0
 
-    overlapping_files = target_files & candidate_pr.modified_files_post)
+    overlapping_files = target_files & candidate_pr.modified_files_post
     
     if not overlapping_files:
         return 0.0
