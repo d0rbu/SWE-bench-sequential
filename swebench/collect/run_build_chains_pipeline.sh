@@ -119,7 +119,7 @@ uv run python build_chains_pipeline.py \
     --min_chain_length 2 \
     --max_chain_length 5 \
     --blame_threshold 0.05 \
-    --time_window_months 48 \
+    --time_window_months 144 \
     --log_level DEBUG
 
 echo ""
