@@ -190,27 +190,19 @@ def calculate_file_overlap_weight(
     Returns:
         Weight between 0.0 and 1.0 representing the strength of the file overlap
     """
-    # Get all files that target PR touches (both pre and post)
-    target_all_files = target_pr.modified_files_pre | target_pr.modified_files_post
-    
-    if not target_all_files:
+    # Get all pre-existing files that target PR touched
+    target_files = target_pr.modified_files_pre
+
+    if not target_files:
         return 0.0
-    
-    overlapping_files = set()
-    
-    # Case 1: Target touches files that candidate also touched in their pre-state
-    # (Both PRs modify the same existing files)
-    overlapping_files.update(target_all_files & candidate_pr.modified_files_pre)
-    
-    # Case 2: Target touches files that candidate created or renamed to
-    # (Target depends on candidate's new/renamed files)
-    overlapping_files.update(target_all_files & candidate_pr.modified_files_post)
+
+    overlapping_files = target_files & candidate_pr.modified_files_post)
     
     if not overlapping_files:
         return 0.0
     
-    # Calculate weight as ratio of overlapping files to total files in target PR
-    weight = len(overlapping_files) / len(target_all_files)
+    # Calculate weight as ratio of overlapping files to total modified pre-existing files in target PR
+    weight = len(overlapping_files) / len(target_files)
     
     return weight
 
