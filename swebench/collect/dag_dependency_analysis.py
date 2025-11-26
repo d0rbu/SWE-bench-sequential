@@ -502,7 +502,7 @@ def sample_chains_from_dag(
         logger.warning("No connected PRs found in DAG - cannot sample chains")
         return []
 
-    # Start from PRs with no dependencies (leaf nodes in dep sense) that are connected
+    # Start from PRs with no dependencies (leaf nodes, oldest PRs) that are connected
     leaf_prs = [pr for pr in connected_prs if not dag.get_dependencies(pr)]
 
     for i in range(num_chains):
@@ -536,10 +536,9 @@ def sample_chains_from_dag(
 
         # Only add if meets minimum length
         if len(chain) >= min_chain_length:
-            # Reverse so it goes from oldest to newest (dependency order)
-            chains.append(list(reversed(chain)))
+            chains.append(chain)
             logger.info(
-                f"Sampled chain {len(chains)}: {[inst['pull_number'] for inst in reversed(chain)]}"
+                f"Sampled chain {len(chains)}: {[inst['pull_number'] for inst in chain]}"
             )
         else:
             logger.debug(
