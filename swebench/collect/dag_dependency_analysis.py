@@ -456,184 +456,225 @@ def random_sampler(
     return random.choice(leaf_prs)
 
 
-def validate_chain_candidate(
-    chain_prefix: List[PRNode],
-    candidate: PRNode,
+@dataclass
+class ChainValidationContext:
+    """Context for validating a chain, reusing Docker container across candidates."""
+    
+    container: Any  # docker.models.containers.Container
+    client: docker.DockerClient
+    log_dir: Path
+    validation_logger: Any  # logging.Logger
+    applied_nodes: List[PRNode]
+    
+    def cleanup(self) -> None:
+        """Clean up the Docker container."""
+        from swebench.harness.docker_utils import cleanup_container
+        if self.container:
+            cleanup_container(self.client, self.container, self.validation_logger)
+
+
+def create_validation_context(
+    start_node: PRNode,
     client: docker.DockerClient,
+    log_dir: Path,
+) -> Optional[ChainValidationContext]:
+    """
+    Create a validation context with a Docker container for a chain.
+    
+    Args:
+        start_node: The first node in the chain (defines the base environment)
+        client: Docker client for running validation
+        log_dir: Directory for validation logs
+        
+    Returns:
+        ChainValidationContext if successful, None otherwise
+    """
+    from swebench.harness.docker_build import build_container, setup_logger
+    from swebench.harness.test_spec.test_spec import make_test_spec
+    
+    # Create TestSpec for the start node (this defines the test environment)
+    test_spec = make_test_spec(start_node.task_instance)
+    
+    log_file = log_dir / "validation.log"
+    validation_logger = setup_logger(
+        f"validate_chain_{start_node.instance_id}",
+        log_file
+    )
+    
+    try:
+        validation_logger.info(
+            f"Creating validation context for chain starting with PR {start_node.pr_number}"
+        )
+        
+        container = build_container(
+            test_spec,
+            client,
+            run_id="chain_validation",
+            logger=validation_logger,
+            rm_image=False,
+            force_rebuild=False,
+        )
+        container.start()
+        validation_logger.info(f"Container started: {container.id}")
+        
+        return ChainValidationContext(
+            container=container,
+            client=client,
+            log_dir=log_dir,
+            validation_logger=validation_logger,
+            applied_nodes=[],
+        )
+    except Exception as e:
+        validation_logger.error(f"Failed to create validation context: {e}")
+        return None
+
+
+def validate_and_apply_candidate(
+    context: ChainValidationContext,
+    candidate: PRNode,
     timeout: int = 1800,
 ) -> bool:
     """
-    Validate that a candidate PR can be added to a chain by:
-    1. Applying all patches in the chain prefix plus the candidate patch
-    2. Running FAIL_TO_PASS tests to verify they pass
+    Validate and apply a candidate PR to an existing validation context.
+    
+    This incrementally applies the candidate's patch to the existing container
+    and verifies that FAIL_TO_PASS tests pass.
     
     Args:
-        chain_prefix: List of PRNodes already in the chain
-        candidate: PRNode to validate
-        client: Docker client for running validation
+        context: Validation context with Docker container
+        candidate: PRNode to validate and apply
         timeout: Timeout for test execution in seconds
         
     Returns:
-        True if candidate is valid (patches apply and tests pass), False otherwise
+        True if candidate is valid (patch applies and tests pass), False otherwise
     """
     from swebench.harness.constants import (
-        APPLY_PATCH_FAIL,
         DOCKER_PATCH,
         DOCKER_USER,
         DOCKER_WORKDIR,
-        KEY_PREDICTION,
         UTF8,
     )
-    from swebench.harness.docker_build import build_container, setup_logger
-    from swebench.harness.docker_utils import cleanup_container, copy_to_container, exec_run_with_timeout
+    from swebench.harness.docker_utils import copy_to_container, exec_run_with_timeout
     from swebench.harness.grading import get_logs_eval
     from swebench.harness.test_spec.test_spec import make_test_spec
     
-    # Use the candidate's base_commit as the starting point
-    # This is the commit before any patches in the chain
-    start_node = chain_prefix[0] if chain_prefix else candidate
-    base_commit = start_node.base_commit
+    validation_logger = context.validation_logger
+    container = context.container
+    log_dir = context.log_dir
     
-    # Create TestSpec for the candidate (this defines the test environment)
-    test_spec = make_test_spec(candidate.task_instance)
-    
-    # Create a temporary directory for validation logs
-    with tempfile.TemporaryDirectory() as temp_dir:
-        log_dir = Path(temp_dir)
-        log_file = log_dir / "validation.log"
-        validation_logger = setup_logger(
-            f"validate_{candidate.instance_id}",
-            log_file
+    try:
+        validation_logger.info(
+            f"Validating candidate {candidate.pr_number} "
+            f"(chain length: {len(context.applied_nodes)})"
         )
         
-        container = None
-        try:
-            # Build and start container
-            validation_logger.info(
-                f"Validating candidate {candidate.pr_number} after chain prefix: "
-                f"{[node.pr_number for node in chain_prefix]}"
-            )
-            
-            container = build_container(
-                test_spec,
-                client,
-                run_id="chain_validation",
-                logger=validation_logger,
-                rm_image=False,
-                force_rebuild=False,
-            )
-            container.start()
-            validation_logger.info(f"Container started: {container.id}")
-            
-            # Apply patches in order: chain_prefix patches + candidate patch
-            all_nodes = chain_prefix + [candidate]
-            for idx, node in enumerate(all_nodes):
-                patch = node.task_instance.get("patch", "")
-                if not patch or not patch.strip():
-                    validation_logger.warning(f"Node {node.pr_number} has empty patch")
-                    continue
-                
-                # Write patch to temporary file and copy to container
-                patch_file = log_dir / f"patch_{idx}_{node.pr_number}.diff"
-                patch_file.write_text(patch)
-                copy_to_container(container, patch_file, PurePosixPath(DOCKER_PATCH))
-                
-                # Try to apply patch
-                validation_logger.info(f"Applying patch for PR {node.pr_number}")
-                applied = False
-                
-                git_apply_cmds = [
-                    "git apply --verbose",
-                    "git apply --verbose --reject",
-                ]
-                
-                for git_apply_cmd in git_apply_cmds:
-                    result = container.exec_run(
-                        f"{git_apply_cmd} {DOCKER_PATCH}",
-                        workdir=DOCKER_WORKDIR,
-                        user=DOCKER_USER,
-                    )
-                    if result.exit_code == 0:
-                        validation_logger.info(
-                            f"Patch applied successfully with: {git_apply_cmd}"
-                        )
-                        applied = True
-                        break
-                    else:
-                        validation_logger.debug(
-                            f"Failed to apply with {git_apply_cmd}: "
-                            f"{result.output.decode(UTF8)}"
-                        )
-                
-                if not applied:
-                    validation_logger.warning(
-                        f"Failed to apply patch for PR {node.pr_number}"
-                    )
-                    return False
-            
-            # Run tests - only FAIL_TO_PASS tests for the candidate
-            validation_logger.info(
-                f"Running FAIL_TO_PASS tests for candidate {candidate.pr_number}"
-            )
-            
-            # Create eval script
-            eval_file = log_dir / "eval.sh"
-            eval_file.write_text(test_spec.eval_script)
-            copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
-            
-            # Execute tests
-            test_output_file = log_dir / "test_output.txt"
-            test_output, timed_out, total_runtime = exec_run_with_timeout(
-                container, "/bin/bash /eval.sh", timeout
-            )
-            
-            if timed_out:
-                validation_logger.warning(
-                    f"Tests timed out after {timeout} seconds"
-                )
-                return False
-            
-            # Write test output
-            test_output_file.write_text(test_output)
-            validation_logger.info(f"Tests completed in {total_runtime:.2f}s")
-            
-            # Parse test results
-            status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
-            
-            if not tests_ran:
-                validation_logger.warning("Tests did not run successfully")
-                return False
-            
-            # Check that all FAIL_TO_PASS tests passed
-            fail_to_pass_tests = test_spec.FAIL_TO_PASS
-            if not fail_to_pass_tests:
-                validation_logger.warning("No FAIL_TO_PASS tests defined")
-                return False
-            
-            all_passed = True
-            for test_case in fail_to_pass_tests:
-                test_status = status_map.get(test_case, "FAILED")
-                if test_status not in ["PASSED", "XFAIL"]:
-                    validation_logger.warning(
-                        f"FAIL_TO_PASS test {test_case} did not pass: {test_status}"
-                    )
-                    all_passed = False
-            
-            if all_passed:
-                validation_logger.info(
-                    f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number}"
-                )
-            
-            return all_passed
-            
-        except Exception as e:
-            validation_logger.error(f"Validation error: {e}")
+        # Get the patch
+        patch = candidate.task_instance.get("patch", "")
+        if not patch or not patch.strip():
+            validation_logger.warning(f"Candidate {candidate.pr_number} has empty patch")
             return False
-            
-        finally:
-            # Always cleanup container
-            if container:
-                cleanup_container(client, container, validation_logger)
+        
+        # Write patch to temporary file and copy to container
+        patch_file = log_dir / f"patch_{len(context.applied_nodes)}_{candidate.pr_number}.diff"
+        patch_file.write_text(patch)
+        copy_to_container(container, patch_file, PurePosixPath(DOCKER_PATCH))
+        
+        # Try to apply patch
+        validation_logger.info(f"Applying patch for PR {candidate.pr_number}")
+        applied = False
+        
+        git_apply_cmds = [
+            "git apply --verbose",
+            "git apply --verbose --reject",
+        ]
+        
+        for git_apply_cmd in git_apply_cmds:
+            result = container.exec_run(
+                f"{git_apply_cmd} {DOCKER_PATCH}",
+                workdir=DOCKER_WORKDIR,
+                user=DOCKER_USER,
+            )
+            if result.exit_code == 0:
+                validation_logger.info(
+                    f"Patch applied successfully with: {git_apply_cmd}"
+                )
+                applied = True
+                break
+            else:
+                validation_logger.debug(
+                    f"Failed to apply with {git_apply_cmd}: "
+                    f"{result.output.decode(UTF8)}"
+                )
+        
+        if not applied:
+            validation_logger.warning(
+                f"Failed to apply patch for PR {candidate.pr_number}"
+            )
+            return False
+        
+        # Run tests - only FAIL_TO_PASS tests for the candidate
+        validation_logger.info(
+            f"Running FAIL_TO_PASS tests for candidate {candidate.pr_number}"
+        )
+        
+        # Create TestSpec for the candidate to get the right test configuration
+        test_spec = make_test_spec(candidate.task_instance)
+        
+        # Create eval script
+        eval_file = log_dir / f"eval_{len(context.applied_nodes)}_{candidate.pr_number}.sh"
+        eval_file.write_text(test_spec.eval_script)
+        copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
+        
+        # Execute tests
+        test_output_file = log_dir / f"test_output_{len(context.applied_nodes)}_{candidate.pr_number}.txt"
+        test_output, timed_out, total_runtime = exec_run_with_timeout(
+            container, "/bin/bash /eval.sh", timeout
+        )
+        
+        if timed_out:
+            validation_logger.warning(
+                f"Tests timed out after {timeout} seconds"
+            )
+            return False
+        
+        # Write test output
+        test_output_file.write_text(test_output)
+        validation_logger.info(f"Tests completed in {total_runtime:.2f}s")
+        
+        # Parse test results
+        status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
+        
+        if not tests_ran:
+            validation_logger.warning("Tests did not run successfully")
+            return False
+        
+        # Check that all FAIL_TO_PASS tests passed
+        fail_to_pass_tests = test_spec.FAIL_TO_PASS
+        if not fail_to_pass_tests:
+            validation_logger.warning("No FAIL_TO_PASS tests defined")
+            return False
+        
+        all_passed = True
+        for test_case in fail_to_pass_tests:
+            test_status = status_map.get(test_case, "FAILED")
+            if test_status not in ["PASSED", "XFAIL"]:
+                validation_logger.warning(
+                    f"FAIL_TO_PASS test {test_case} did not pass: {test_status}"
+                )
+                all_passed = False
+        
+        if all_passed:
+            validation_logger.info(
+                f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number}"
+            )
+            # Add to applied nodes since validation succeeded
+            context.applied_nodes.append(candidate)
+        
+        return all_passed
+        
+    except Exception as e:
+        validation_logger.error(f"Validation error: {e}")
+        return False
 
 
 def sample_chains_from_dag(
@@ -712,119 +753,146 @@ def sample_chains_from_dag(
         chain = []
         chain_nodes = []  # Track PRNodes for validation
         current_pr = best_pr
-
-        while current_pr and len(chain) < max_chain_length:
-            node = dag.nodes[current_pr]
+        validation_context = None
+        
+        # Create validation context if validation is enabled
+        if validate_chains and docker_client:
+            # Create a temporary directory for this chain's validation logs
+            temp_dir = tempfile.mkdtemp(prefix=f"chain_validation_{i}_")
+            log_dir = Path(temp_dir)
             
-            # Validate current node if validation is enabled
-            if validate_chains and docker_client:
-                if not validate_chain_candidate(
-                    chain_nodes,
-                    node,
-                    docker_client,
-                    validation_timeout,
-                ):
-                    if not chain:
-                        # First node failed validation
-                        logger.warning(
-                            f"Starting node {current_pr} failed validation, skipping"
-                        )
-                        # Remove from leaf_prs and try another
-                        leaf_prs = [pr for pr in leaf_prs if pr != current_pr]
-                        break
-                    else:
-                        # Subsequent node failed - try alternatives
-                        logger.debug(
-                            f"Candidate {current_pr} failed validation at position {len(chain)}"
-                        )
-                        # This shouldn't happen since we validate before setting current_pr
-                        # But handle it gracefully
-                        break
+            start_node = dag.nodes[best_pr]
+            validation_context = create_validation_context(
+                start_node,
+                docker_client,
+                log_dir,
+            )
             
-            # Add node to chain (it's validated or validation is disabled)
-            chain.append(node.task_instance)
-            chain_nodes.append(node)
-            used_prs.add(current_pr)
-            covered_files.update(node.modified_files_pre | node.modified_files_post)
+            if validation_context is None:
+                logger.warning(
+                    f"Failed to create validation context for chain starting with {best_pr}"
+                )
+                # Remove from leaf_prs and try another
+                leaf_prs = [pr for pr in leaf_prs if pr != best_pr]
+                continue
 
-            # Find next node if we have room for more
-            if len(chain) < max_chain_length:
-                dependent_weights = dag.get_dependent_weights(current_pr)
+        try:
+            while current_pr and len(chain) < max_chain_length:
+                node = dag.nodes[current_pr]
                 
-                if not dependent_weights:
-                    # No more dependents, end chain
-                    break
-                
-                if not validate_chains:
-                    # No validation - just follow strongest dependent
-                    best_dep = max(dependent_weights, key=dependent_weights.get)
-                    current_pr = int(best_dep)
-                else:
-                    # With validation - find a valid dependent
-                    # Sort candidates by weight (descending)
-                    candidates = sorted(
-                        dependent_weights.items(),
-                        key=lambda x: x[1],
-                        reverse=True
-                    )
-                    
-                    # Try candidates in order of weight, with blacklisting
-                    blacklist = set()
-                    validated_candidate = None
-                    
-                    for candidate_pr, weight in candidates:
-                        if candidate_pr in blacklist:
-                            continue
-                        
-                        candidate_node = dag.nodes[candidate_pr]
-                        logger.debug(
-                            f"Validating candidate {candidate_pr} "
-                            f"(weight: {weight:.2f}) for chain position {len(chain)}"
-                        )
-                        
-                        # Validate this candidate as the next node in the chain
-                        if validate_chain_candidate(
-                            chain_nodes,
-                            candidate_node,
-                            docker_client,
-                            validation_timeout,
-                        ):
-                            validated_candidate = candidate_pr
-                            logger.info(
-                                f"Candidate {candidate_pr} validated successfully"
+                # Validate and apply current node if validation is enabled
+                if validate_chains and validation_context:
+                    if not validate_and_apply_candidate(
+                        validation_context,
+                        node,
+                        validation_timeout,
+                    ):
+                        if not chain:
+                            # First node failed validation
+                            logger.warning(
+                                f"Starting node {current_pr} failed validation, skipping"
                             )
+                            # Remove from leaf_prs and try another
+                            leaf_prs = [pr for pr in leaf_prs if pr != current_pr]
                             break
                         else:
+                            # Subsequent node failed - try alternatives
                             logger.debug(
-                                f"Candidate {candidate_pr} failed validation, blacklisting"
+                                f"Candidate {current_pr} failed validation at position {len(chain)}"
                             )
-                            blacklist.add(candidate_pr)
+                            # This shouldn't happen since we validate before setting current_pr
+                            # But handle it gracefully
+                            break
+                
+                # Add node to chain (it's validated or validation is disabled)
+                chain.append(node.task_instance)
+                chain_nodes.append(node)
+                used_prs.add(current_pr)
+                covered_files.update(node.modified_files_pre | node.modified_files_post)
+
+                # Find next node if we have room for more
+                if len(chain) < max_chain_length:
+                    dependent_weights = dag.get_dependent_weights(current_pr)
                     
-                    if validated_candidate is None:
-                        logger.info(
-                            f"Could not find valid candidate after {current_pr}, "
-                            f"ending chain early at length {len(chain)}"
-                        )
+                    if not dependent_weights:
+                        # No more dependents, end chain
                         break
                     
-                    # Use the validated candidate for next iteration
-                    current_pr = validated_candidate
-            else:
-                # Reached max chain length
-                break
+                    if not validate_chains:
+                        # No validation - just follow strongest dependent
+                        best_dep = max(dependent_weights, key=dependent_weights.get)
+                        current_pr = int(best_dep)
+                    else:
+                        # With validation - find a valid dependent
+                        # Sort candidates by weight (descending)
+                        candidates = sorted(
+                            dependent_weights.items(),
+                            key=lambda x: x[1],
+                            reverse=True
+                        )
+                        
+                        # Try candidates in order of weight, with blacklisting
+                        blacklist = set()
+                        validated_candidate = None
+                        
+                        for candidate_pr, weight in candidates:
+                            if candidate_pr in blacklist:
+                                continue
+                            
+                            candidate_node = dag.nodes[candidate_pr]
+                            logger.debug(
+                                f"Validating candidate {candidate_pr} "
+                                f"(weight: {weight:.2f}) for chain position {len(chain)}"
+                            )
+                            
+                            # Validate this candidate as the next node in the chain
+                            if validate_and_apply_candidate(
+                                validation_context,
+                                candidate_node,
+                                validation_timeout,
+                            ):
+                                validated_candidate = candidate_pr
+                                logger.info(
+                                    f"Candidate {candidate_pr} validated successfully"
+                                )
+                                break
+                            else:
+                                logger.debug(
+                                    f"Candidate {candidate_pr} failed validation, blacklisting"
+                                )
+                                blacklist.add(candidate_pr)
+                        
+                        if validated_candidate is None:
+                            logger.info(
+                                f"Could not find valid candidate after {current_pr}, "
+                                f"ending chain early at length {len(chain)}"
+                            )
+                            break
+                        
+                        # Use the validated candidate for next iteration
+                        current_pr = validated_candidate
+                else:
+                    # Reached max chain length
+                    break
 
-        # Only add if meets minimum length
-        if len(chain) >= min_chain_length:
-            chains.append(chain)
-            logger.info(
-                f"Sampled chain {len(chains)}: {[inst['pull_number'] for inst in chain]}"
-            )
-        else:
-            logger.debug(
-                f"Chain from PR {best_pr} too short ({len(chain)} < {min_chain_length})"
-            )
-            # Remove this leaf PR so we don't try it again
-            leaf_prs = [pr for pr in leaf_prs if pr != best_pr]
+            # Only add if meets minimum length
+            if len(chain) >= min_chain_length:
+                chains.append(chain)
+                logger.info(
+                    f"Sampled chain {len(chains)}: {[inst['pull_number'] for inst in chain]}"
+                )
+            else:
+                logger.debug(
+                    f"Chain from PR {best_pr} too short ({len(chain)} < {min_chain_length})"
+                )
+                # Remove this leaf PR so we don't try it again
+                leaf_prs = [pr for pr in leaf_prs if pr != best_pr]
+        
+        finally:
+            # Clean up validation context (Docker container) after chain is complete
+            if validation_context:
+                validation_context.cleanup()
+                logger.info(f"Cleaned up validation context for chain {i + 1}")
 
     if not chains:
         logger.warning(
