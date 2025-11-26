@@ -1,240 +1,581 @@
+"""
+Chain construction module for SWE-bench-sequential.
+
+This module provides DAG-based dependency analysis to construct chains of related PRs.
+Dependencies are determined through git blame analysis on modified/deleted lines,
+temporal proximity, issue relationships, and file overlap. Chains are sampled from
+the resulting DAG to maximize diversity.
+"""
+
+from __future__ import annotations
+
+import hashlib
 import json
+import logging
+import time
+from collections import Counter
 from datetime import datetime
-from tqdm import tqdm
-import os
-import subprocess
-from tempfile import TemporaryDirectory
-from unidiff import PatchSet
-from swebench.collect.utils import Repo, extract_modified_files, build_dependency_graph, find_connected_components, extract_problem_statement_and_hints
-from swebench.versioning.get_versions import get_version
+from itertools import pairwise
+from typing import Any, Dict, List, Optional
+
+# Import DAG-based dependency analysis
+from swebench.collect.dag_dependency_analysis import (
+    PRSampler,
+    build_dependency_dag,
+    file_coverage_sampler,
+    sample_chains_from_dag,
+)
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
-def construct_chains_from_prs(prs_jsonl_path: str, output_path: str, target_chains: int = 10):
+class Chain:
     """
-    Main function to construct, score, and select the best issue chains.
+    Represents a sequence of related task instances forming a multi-turn chain.
 
-    Args:
-        prs_jsonl_path (str): Path to the .jsonl file with raw PR data.
-        output_path (str): Path to save the final chains .jsonl file.
-        target_chains (int): The number of top-quality chains to save for the pilot dataset.
+    A chain contains multiple task instances that are related through shared issues,
+    temporal proximity, or other relationships. Each chain has a unique ID and
+    metadata describing its properties.
     """
-    with open(prs_jsonl_path, 'r') as f:
-        prs = [json.loads(line) for line in f if line.strip()]
-    
-    if not prs:
-        print("No pull requests found.")
-        return
 
-    repo_name = prs[0]['base']['repo']['full_name']
-    owner, repo = repo_name.split("/")
-    repo_obj = Repo(owner, repo)
-    pr_map = {pr['number']: pr for pr in prs}
-    print(f"Processing {len(prs)} PRs from {repo_name}...")
+    def __init__(
+        self,
+        task_instances: List[Dict[str, Any]],
+        chain_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Initialize a Chain object.
 
-    prs_with_files = []
-    for pr in tqdm(prs, desc="Fetching modified files"):
-        pr['modified_files'] = extract_modified_files(pr, repo_obj)
-        prs_with_files.append(pr)
+        Args:
+            task_instances: List of task instance dictionaries
+            chain_id: Optional chain identifier. If None, will be auto-generated
+            metadata: Optional metadata dictionary
+        """
+        self.task_instances = task_instances or []
+        self.metadata = metadata or {}
+        self.created_at = datetime.utcnow().isoformat()
 
-    print("Building dependency graph...")
-    dependency_graph = build_dependency_graph(prs_with_files)
+        # Validate that all instances are from the same repository
+        if self.task_instances:
+            repos = set(instance.get("repo") for instance in self.task_instances)
+            if len(repos) > 1:
+                raise ValueError(
+                    f"All task instances must be from the same repository. "
+                    f"Found multiple repositories: {repos}"
+                )
 
-    print("Finding connected components...")
-    chains_of_numbers = find_connected_components(dependency_graph)
-    multi_turn_chains = [chain for chain in chains_of_numbers if len(chain) > 1]
-    print(f"Found {len(multi_turn_chains)} potential multi-turn chains.")
+        # Generate chain ID if not provided
+        if chain_id is None:
+            self.chain_id = self._generate_chain_id()
+        else:
+            self.chain_id = chain_id
 
-    # Score all potential chains
-    scored_chains = []
-    for chain_pr_numbers in multi_turn_chains:
-        chain_prs = [pr_map[num] for num in chain_pr_numbers if num in pr_map]
-        chain_prs.sort(key=lambda pr: datetime.fromisoformat(pr['created_at'].replace('Z', '+00:00')))
-        
-        score = score_chain_quality(chain_prs)
-        if score > 0:  # Only consider valid (all merged) chains
-            scored_chains.append({'pr_numbers': chain_pr_numbers, 'score': score})
-    
-    # Sort chains by score in descending order
-    scored_chains.sort(key=lambda x: x['score'], reverse=True)
-    print(f"Scored and validated {len(scored_chains)} chains.")
+        # Update metadata with computed values
+        self._update_metadata()
 
-    # Select the top N chains for our pilot dataset
-    top_chains_to_process = [c['pr_numbers'] for c in scored_chains[:target_chains]]
+        # Validate the chain
+        self._validate_chain()
 
-    # Process and enrich only the top-scoring chains
-    final_chains = process_and_enrich_chains(top_chains_to_process, prs, repo_obj)
+    def _generate_chain_id(self) -> str:
+        """
+        Generate a unique chain ID based on constituent task instances.
 
-    with open(output_path, 'w') as f:
-        for chain in final_chains:
-            f.write(json.dumps(chain) + '\n')
-    
-    print(f"Saved {len(final_chains)} top-quality chains to {output_path}")
+        Format: {repo}__chain-{hash}
+        where hash is derived from PR numbers and timestamps.
 
+        Returns:
+            Unique chain identifier string
+        """
+        if not self.task_instances:
+            # Fallback for empty chains
+            timestamp = str(int(time.time()))
+            return f"empty__chain-{timestamp}"
 
-def process_and_enrich_chains(chains: list[list[int]], prs: list[dict], repo_obj: Repo) -> list[dict]:
-    """
-    Enriches, sorts, and converts chains of PR numbers into structured multi-turn task instances.
-    (Corrected base_commit logic)
-    """
-    pr_map = {pr['number']: pr for pr in prs}
-    final_chains = []
+        # Get repo name from first task instance
+        repo = self.task_instances[0].get("repo", "unknown")
+        repo_clean = repo.replace("/", "__")
 
-    for chain_pr_numbers in tqdm(chains, desc="Processing and enriching chains"):
-        chain_prs = [pr_map[num] for num in chain_pr_numbers if num in pr_map]
-        chain_prs.sort(key=lambda pr: datetime.fromisoformat(pr['created_at'].replace('Z', '+00:00')))
+        # Create hash from PR numbers and creation times
+        hash_input = ""
+        for instance in self.task_instances:
+            pr_num = instance.get("pull_number", 0)
+            created = instance.get("created_at", "")
+            hash_input += f"{pr_num}-{created}"
 
-        repo_name_sanitized = repo_obj.repo.full_name.replace("/", "__")
-        chain_id = f"{repo_name_sanitized}_chain_{chain_prs[0]['number']}"
-        
-        chain_object = {
-            "chain_id": chain_id,
-            "chain_length": len(chain_prs),
-            "repository": repo_obj.repo.full_name,
-            "turns": []
+        # Generate short hash
+        hash_obj = hashlib.md5(hash_input.encode())
+        short_hash = hash_obj.hexdigest()[:8]
+
+        return f"{repo_clean}__chain-{short_hash}"
+
+    def _update_metadata(self) -> None:
+        """Update chain metadata with computed values."""
+        # Extract PR numbers, filtering out None values
+        raw_pr_numbers = [
+            instance.get("pull_number") for instance in self.task_instances
+        ]
+        pr_numbers = [pr_num for pr_num in raw_pr_numbers if pr_num is not None]
+
+        self.metadata.update(
+            {
+                "length": len(self.task_instances),
+                "created_at": self.created_at,
+                "validation_status": "pending",
+                "repositories": list(
+                    set(instance.get("repo", "") for instance in self.task_instances)
+                ),
+                "pull_numbers": pr_numbers,
+                "date_range": self._get_date_range(),
+                "dependencies": self._extract_dependencies(),
+            }
+        )
+
+    def _get_date_range(self) -> Dict[str, Optional[str]]:
+        """
+        Get the date range covered by this chain.
+
+        Returns:
+            Dictionary with 'start' and 'end' dates
+        """
+        if not self.task_instances:
+            return {"start": None, "end": None}
+
+        # Extract dates, filtering out None values
+        raw_dates = [instance.get("created_at") for instance in self.task_instances]
+        dates = [date for date in raw_dates if date is not None]
+
+        if not dates:
+            return {"start": None, "end": None}
+
+        dates.sort()
+        return {"start": dates[0], "end": dates[-1]}
+
+    def _extract_dependencies(self) -> List[Dict[str, Any]]:
+        """
+        Extract dependency relationships between task instances in the chain.
+
+        Returns:
+            List of dependency relationships
+        """
+        dependencies = []
+
+        # Simple temporal dependencies (each PR depends on the previous one)
+        for prev_instance, curr_instance in pairwise(self.task_instances):
+            dependencies.append(
+                {
+                    "from_pr": prev_instance.get("pull_number"),
+                    "to_pr": curr_instance.get("pull_number"),
+                }
+            )
+
+        return dependencies
+
+    def _validate_chain(self) -> None:
+        """
+        Validate the chain for integrity and consistency.
+
+        Raises:
+            ValueError: If chain validation fails
+        """
+        errors = []
+
+        # Check for empty chain
+        if not self.task_instances:
+            errors.append("Chain cannot be empty")
+
+        # Check for duplicate PRs
+        pr_numbers = [
+            instance.get("pull_number")
+            for instance in self.task_instances
+            if instance.get("pull_number") is not None
+        ]
+        # Use Counter to find duplicates and their counts
+        pr_counts = Counter(pr_numbers)
+        duplicates = {pr: count for pr, count in pr_counts.items() if count > 1}
+        if duplicates:
+            errors.append(
+                f"Chain contains duplicate PR numbers: {duplicates} (PR number: count)"
+            )
+
+        # Check that all instances have required fields
+        required_fields = ["repo", "pull_number", "instance_id"]
+        for i, instance in enumerate(self.task_instances):
+            for field in required_fields:
+                if field not in instance:
+                    errors.append(f"Task instance {i} missing required field: {field}")
+
+        # Check repository consistency (all instances should be from same repo)
+        repos = set(instance.get("repo") for instance in self.task_instances)
+        if len(repos) > 1:
+            errors.append(
+                f"Chain contains instances from multiple repositories: {repos}"
+            )
+
+        if errors:
+            self.metadata["validation_status"] = "failed"
+            self.metadata["validation_errors"] = errors
+            raise ValueError(f"Chain validation failed: {'; '.join(errors)}")
+        else:
+            self.metadata["validation_status"] = "passed"
+
+    def add_task_instance(self, task_instance: Dict[str, Any]) -> None:
+        """
+        Add a task instance to the chain.
+
+        Args:
+            task_instance: Task instance dictionary to add
+        """
+        self.task_instances.append(task_instance)
+        self._update_metadata()
+        self._validate_chain()
+
+    def remove_task_instance(self, instance_id: str) -> bool:
+        """
+        Remove a task instance from the chain by instance ID.
+
+        Args:
+            instance_id: ID of the task instance to remove
+
+        Returns:
+            True if instance was found and removed, False otherwise
+        """
+        original_length = len(self.task_instances)
+        self.task_instances = [
+            instance
+            for instance in self.task_instances
+            if instance.get("instance_id") != instance_id
+        ]
+
+        if len(self.task_instances) < original_length:
+            self._update_metadata()
+            if self.task_instances:  # Only validate if chain is not empty
+                self._validate_chain()
+            return True
+        return False
+
+    def get_task_instance(self, instance_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a task instance by its ID.
+
+        Args:
+            instance_id: ID of the task instance to retrieve
+
+        Returns:
+            Task instance dictionary if found, None otherwise
+        """
+        matching_instances = [
+            instance
+            for instance in self.task_instances
+            if instance.get("instance_id") == instance_id
+        ]
+
+        if len(matching_instances) == 0:
+            return None
+
+        assert len(matching_instances) == 1, (
+            f"Expected exactly 1 instance with ID '{instance_id}', "
+            f"found {len(matching_instances)}"
+        )
+
+        return matching_instances[0]
+
+    def sort_by_date(self, reverse: bool = False) -> None:
+        """
+        Sort task instances in the chain by creation date.
+
+        Args:
+            reverse: If True, sort in descending order (newest first)
+        """
+        self.task_instances.sort(key=lambda x: x.get("created_at", ""), reverse=reverse)
+        self._update_metadata()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert chain to dictionary representation.
+
+        Returns:
+            Dictionary representation of the chain
+        """
+        return {
+            "chain_id": self.chain_id,
+            "task_instances": self.task_instances,
+            "metadata": self.metadata,
+            "created_at": self.created_at,
         }
 
-        is_chain_valid = True
-        for i, pr in enumerate(chain_prs):
-            task_instance = create_instance_with_git(pr, repo_obj)
-            
-            if task_instance is None:
-                is_chain_valid = False
-                break
+    def to_jsonl(self) -> str:
+        """
+        Serialize chain to JSONL format.
 
-            # The base_commit for turn `i` is the merge_commit of turn `i-1`.
-            if i > 0:
-                prev_pr = chain_prs[i - 1]
-                task_instance['base_commit'] = prev_pr['merge_commit_sha']
-            
-            task_instance['turn_id'] = i
-            task_instance['depends_on'] = [chain_prs[j]['number'] for j in range(i)]
-            chain_object['turns'].append(task_instance)
-        
-        if is_chain_valid and len(chain_object['turns']) > 1:
-            final_chains.append(chain_object)
-    
-    return final_chains
+        Returns:
+            JSONL string representation of the chain
+        """
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Chain:
+        """
+        Create Chain object from dictionary representation.
+
+        Args:
+            data: Dictionary containing chain data
+
+        Returns:
+            Chain object
+        """
+        chain = cls(
+            task_instances=data.get("task_instances", []),
+            chain_id=data.get("chain_id"),
+            metadata=data.get("metadata", {}),
+        )
+
+        # Restore created_at if provided
+        if "created_at" in data:
+            chain.created_at = data["created_at"]
+
+        return chain
+
+    @classmethod
+    def from_jsonl(cls, jsonl_str: str) -> Chain:
+        """
+        Deserialize chain from JSONL format.
+
+        Args:
+            jsonl_str: JSONL string representation
+
+        Returns:
+            Chain object
+        """
+        data = json.loads(jsonl_str)
+        return cls.from_dict(data)
+
+    def __len__(self) -> int:
+        """Return the number of task instances in the chain."""
+        return len(self.task_instances)
+
+    def __iter__(self):
+        """Iterate over task instances in the chain."""
+        return iter(self.task_instances)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        """Get task instance by index."""
+        return self.task_instances[index]
+
+    def __repr__(self) -> str:
+        """String representation of the chain."""
+        return f"Chain(id='{self.chain_id}', length={len(self.task_instances)})"
 
 
-def score_chain_quality(chain_prs: list[dict]) -> float:
+def create_single_instance_chain(task_instance: Dict[str, Any]) -> Chain:
     """
-    Scores the quality of a potential chain based on several heuristics.
+    Create a chain containing a single task instance.
+
+    This function provides backward compatibility by treating single instances
+    as single-item chains.
 
     Args:
-        chain_prs (list[dict]): A chronologically sorted list of PR objects in the chain.
+        task_instance: Single task instance dictionary
 
     Returns:
-        float: A quality score for the chain. Higher is better.
+        Chain object containing the single instance
     """
-    score = 0.0
-    
-    # Heuristic 1: Chain Length (longer chains are more valuable)
-    score += len(chain_prs) * 1.0
-
-    # Heuristic 2: All PRs must be merged. This is a critical requirement.
-    if not all(pr['merged_at'] for pr in chain_prs):
-        return 0.0  # Invalid chain if any PR is not merged
-    
-    # Heuristic 3: Time between turns. Shorter time is a stronger signal.
-    total_days = 0
-    for i in range(len(chain_prs) - 1):
-        date1 = datetime.fromisoformat(chain_prs[i]['created_at'].replace('Z', '+00:00'))
-        date2 = datetime.fromisoformat(chain_prs[i+1]['created_at'].replace('Z', '+00:00'))
-        total_days += (date2 - date1).days
-    
-    avg_days_between_turns = total_days / (len(chain_prs) - 1) if len(chain_prs) > 1 else 0
-    
-    # Penalize chains with long gaps
-    if avg_days_between_turns < 7:
-        score += 2.0
-    elif avg_days_between_turns < 30:
-        score += 1.0
-
-    # Heuristic 4: All PRs from the same author is a strong signal.
-    authors = {pr['user']['login'] for pr in chain_prs}
-    if len(authors) == 1:
-        score += 3.0
-        
-    return score
+    return Chain([task_instance])
 
 
-def create_instance_with_git(pr: dict, repo_obj: Repo) -> dict:
+def validate_chain_id(chain_id: str) -> bool:
     """
-    Creates a task instance from a PR by cloning the repo, generating the
-    patch using git, and dynamically determining the software version.
+    Validate that a chain ID follows the expected format.
 
-    Returns a dictionary for the instance, or None if validation fails.
+    Args:
+        chain_id: Chain ID to validate
+
+    Returns:
+        True if valid, False otherwise
     """
-    instance_id = f"{repo_obj.repo.full_name.replace('/', '__')}-{pr['number']}"
+    if not chain_id:
+        return False
 
-    # 1. Extract problem statement
-    problem_statement, _ = extract_problem_statement_and_hints(pr, repo_obj)
-    if not problem_statement:
-        return None
+    # Expected format: {repo}__chain-{hash}
+    parts = chain_id.split("__chain-")
+    if len(parts) != 2:
+        return False
 
-    # 2. Generate patch using a temporary git clone
-    try:
-        with TemporaryDirectory() as temp_dir:
-            repo_path = os.path.join(temp_dir, "repo")
-            repo_url = f"https://github.com/{repo_obj.repo.full_name}.git"
-            
-            clone_result = subprocess.run(
-                ["git", "clone", "--bare", repo_url, repo_path], 
-                check=False, capture_output=True, text=True, timeout=300
-            )
-            if clone_result.returncode != 0:
-                print(f"DEBUG: Skipping PR #{pr['number']}: Failed to clone repo. Error: {clone_result.stderr}")
-                return None
+    repo_part, hash_part = parts
 
-            patch_cmd = ["git", "diff", pr["base"]["sha"], pr["merge_commit_sha"]]
-            diff_result = subprocess.run(
-                patch_cmd, cwd=repo_path, check=False, capture_output=True, text=True, timeout=60
-            )
-            if diff_result.returncode != 0:
-                print(f"DEBUG: Skipping PR #{pr['number']}: Git diff failed. Error: {diff_result.stderr}")
-                return None
-            
-            full_patch = diff_result.stdout
-            if not full_patch:
-                return None
-    except Exception as e:
-        print(f"DEBUG: Skipping PR #{pr['number']}: Subprocess failed. Error: {e}")
-        return None
-    
-    # 3. Split patch into code and test patches
-    patch_fix, patch_test = "", ""
-    for hunk in PatchSet(full_patch):
-        if any(test_word in hunk.path for test_word in ["test", "tests"]):
-            patch_test += str(hunk) + "\n"
-        else:
-            patch_fix += str(hunk) + "\n"
-    
-    if not patch_fix.strip():
-        return None
+    # Check that repo part is not empty and hash part is reasonable length
+    if not repo_part or len(hash_part) < 4:
+        return False
 
-    # 4. Dynamically determine the version
-    # Create a temporary instance dict for the get_version function
-    temp_instance_for_versioning = {
-        "repo": repo_obj.repo.full_name,
-        "base_commit": pr["base"]["sha"]
-    }
-    version = get_version(temp_instance_for_versioning)
-    if version is None:
-        print(f"DEBUG: Skipping PR #{pr['number']}: Could not determine version.")
-        return None
+    return True
 
-    # 5. Construct the final instance object
-    instance = {
-        "repo": repo_obj.repo.full_name,
-        "pull_number": pr["number"],
-        "instance_id": instance_id,
-        "base_commit": pr["base"]["sha"],
-        "merge_commit_sha": pr["merge_commit_sha"],
-        "problem_statement": problem_statement,
-        "patch": patch_fix.strip(),
-        "test_patch": patch_test.strip(),
-        "created_at": pr["created_at"],
-        "version": version,  # Now dynamically determined
-        "resolved_issues": pr.get("resolved_issues", [])
-    }
-    return instance
+
+def build_chains_from_repository_data(
+    task_instances: List[Dict[str, Any]],
+    time_window_months: int = 6,
+    file_overlap_threshold: float = 0.0,
+    num_chains: int = 10,
+    min_chain_length: int = 2,
+    max_chain_length: int = 5,
+    sampler: PRSampler = file_coverage_sampler,
+    seed: Optional[int] = None,
+) -> List[Chain]:
+    """
+    Build chains from task instances using DAG-based dependency analysis.
+
+    This performs sophisticated dependency detection through:
+    - File overlap detection (with precise pre/post state tracking)
+    - Temporal proximity filtering
+    - Issue relationship matching
+
+    Args:
+        task_instances: List of task instance dictionaries
+        time_window_months: Maximum age difference for dependencies (default: 6)
+        file_overlap_threshold: Minimum file overlap weight for dependency (default: 0.0 = any overlap)
+        num_chains: Number of chains to sample from DAG
+        min_chain_length: Minimum chain length
+        max_chain_length: Maximum chain length
+        sampler: Function to select starting PR for chains. Takes (leaf_prs, dag, covered_files, seed)
+                 and returns selected PR number. Defaults to file_coverage_sampler.
+        seed: Random seed for deterministic sampling
+
+    Returns:
+        List of Chain objects sampled from the dependency DAG
+    """
+    if not task_instances:
+        return []
+
+    logger.info(f"Building dependency DAG from {len(task_instances)} task instances")
+
+    # Build the dependency DAG
+    dag = build_dependency_dag(
+        task_instances,
+        time_window_months=time_window_months,
+        file_overlap_threshold=file_overlap_threshold,
+    )
+
+    logger.info(
+        f"DAG built with {len(dag.nodes)} nodes and "
+        f"{sum(len(deps) for deps in dag.edges.values())} edges"
+    )
+
+    # Sample diverse chains from the DAG
+    chain_instances = sample_chains_from_dag(
+        dag,
+        num_chains=num_chains,
+        min_chain_length=min_chain_length,
+        max_chain_length=max_chain_length,
+        sampler=sampler,
+        seed=seed,
+    )
+
+    # Convert to Chain objects
+    chains = [Chain(instances) for instances in chain_instances]
+
+    logger.info(f"Sampled {len(chains)} diverse chains from DAG")
+    return chains
+
+
+def save_chains_to_jsonl(chains: List[Chain], output_file: str) -> None:
+    """
+    Save a list of chains to a JSONL file.
+
+    Args:
+        chains: List of Chain objects to save
+        output_file: Path to output JSONL file
+    """
+    with open(output_file, "w") as f:
+        for chain in chains:
+            f.write(chain.to_jsonl() + "\n")
+
+
+def load_chains_from_jsonl(input_file: str) -> List[Chain]:
+    """
+    Load chains from a JSONL file.
+
+    Args:
+        input_file: Path to input JSONL file
+
+    Returns:
+        List of Chain objects
+    """
+    chains = []
+
+    with open(input_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                chain = Chain.from_jsonl(line)
+                chains.append(chain)
+
+    return chains
+
+
+def load_task_instances(input_file: str) -> List[Dict[str, Any]]:
+    """
+    Load task instances from a file, supporting both JSON and JSONL formats.
+
+    The format is auto-detected based on file extension:
+    - .jsonl or .jsonl.all: JSONL format (one JSON object per line)
+    - .json or other: JSON format (single array of objects)
+
+    All fields from the input instances are preserved, including:
+    - version: Version information added by get_versions.py
+    - repo, pull_number, instance_id, base_commit, patch, etc.
+
+    Args:
+        input_file: Path to input file (JSON or JSONL)
+
+    Returns:
+        List of task instance dictionaries with all fields preserved
+    """
+    task_instances = []
+
+    if any(input_file.endswith(ext) for ext in [".jsonl", ".jsonl.all"]):
+        # JSONL format
+        with open(input_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    instance = json.loads(line)
+                    task_instances.append(instance)
+    else:
+        # JSON format (single array)
+        with open(input_file, "r") as f:
+            task_instances = json.load(f)
+
+    return task_instances
+
+
+def convert_single_instances_to_chains(
+    input_file: str, output_file: str, **kwargs
+) -> None:
+    """
+    Convert a file of single task instances to chains using DAG-based analysis.
+
+    Supports both JSON and JSONL input formats. All task instance fields are
+    preserved in the output chains, including version information if present.
+
+    Args:
+        input_file: Path to input file (JSON or JSONL) with single instances
+        output_file: Path to output JSONL file with chains
+        **kwargs: Additional arguments to pass to build_chains_from_repository_data
+
+    Note:
+        If task instances contain a 'version' field (e.g., from get_versions.py),
+        this information is preserved in the chain output. The chain metadata
+        does not explicitly track versions, but all original task instance
+        fields are maintained.
+    """
+    # Load single instances (supports both JSON and JSONL)
+    task_instances = load_task_instances(input_file)
+
+    # Build chains using DAG-based analysis
+    # All task instance fields (including 'version') are preserved
+    chains = build_chains_from_repository_data(task_instances, **kwargs)
+
+    # Save chains
+    save_chains_to_jsonl(chains, output_file)

@@ -114,6 +114,7 @@ class Repo:
         func: Callable,
         per_page: int = 100,
         num_pages: Optional[int] = None,
+        start_page: int = 1,
         quiet: bool = False,
         **kwargs,
     ) -> Iterator:
@@ -124,10 +125,11 @@ class Repo:
             func (callable): API function to call
             per_page (int): number of values to return per page
             num_pages (int): number of pages to return
+            start_page (int): page number to start from (default: 1)
             quiet (bool): whether to print progress
             **kwargs: keyword arguments to pass to API function
         """
-        page = 1
+        page = start_page
         args = {
             "owner": self.owner,
             "repo": self.name,
@@ -167,7 +169,7 @@ class Repo:
                     time.sleep(60 * 5)
         if not quiet:
             logger.info(
-                f"[{self.owner}/{self.name}] Processed {(page - 1) * per_page + len(values)} values"
+                f"[{self.owner}/{self.name}] Processed {(page - start_page) * per_page + len(values)} values"
             )
 
     def get_all_issues(
@@ -205,6 +207,7 @@ class Repo:
         self,
         per_page: int = 100,
         num_pages: Optional[int] = None,
+        start_page: int = 1,
         direction: str = "desc",
         sort: str = "created",
         state: str = "closed",
@@ -216,6 +219,7 @@ class Repo:
         Args:
             per_page (int): number of PRs to return per page
             num_pages (int): number of pages to return
+            start_page (int): page number to start from (default: 1)
             direction (str): direction to sort PRs
             sort (str): field to sort PRs by
             state (str): state of PRs to look for
@@ -224,6 +228,7 @@ class Repo:
         pulls = self.get_all_loop(
             self.api.pulls.list,
             num_pages=num_pages,
+            start_page=start_page,
             direction=direction,
             per_page=per_page,
             sort=sort,

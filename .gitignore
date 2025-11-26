@@ -170,3 +170,7 @@ cython_debug/
 data/repos/copies
 notebooks/
 *logs/
+swebench/collect/prs
+swebench/collect/tasks
+swebench/collect/ft_tasks/*
+swebench/collect/eval_tasks/*

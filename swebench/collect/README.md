@@ -26,6 +26,12 @@ To run collection on your own repositories, run the `run_get_tasks_pipeline.sh` 
     * This file's values are candidate task instances. Once validated, they can be used for evaluation purposes.
     * The `.json.all` includes these task instances as well.
 
+### Building Chains (Optional)
+After generating task instances, you can optionally build chains of related task instances using `run_build_chains_pipeline.sh`. This uses DAG-based dependency analysis to group related PRs into sequences:
+* `<repo>-chains.jsonl` file containing chains of related task instances.
+    * Each chain represents a sequence of dependent PRs that should be solved in order.
+    * Dependencies are identified through git blame analysis and issue tracking.
+
 ## Directory Overview
 In this section, we briefly describe each of the files in this directory and its usage details.
 
@@ -44,6 +50,16 @@ In this section, we briefly describe each of the files in this directory and its
 * `get_tasks_pipeline.py`
     * Purpose: Automates invocation of the repo → task instance construction pipeline (`print_pulls.py` + `build_dataset.py`) for multiple repositories
     * Usage: `./run_get_tasks_pipeline` (Check file for arguments)
+
+**🔗 Chain Construction**
+* `build_chains_pipeline.py`
+    * Purpose: Builds chains of related task instances using DAG-based dependency analysis with git blame and issue tracking. This converts single task instances into sequences of dependent PRs.
+    * Usage: `./run_build_chains_pipeline.sh` (Check file for arguments)
+    * Features:
+        - Git blame analysis to identify code dependencies between PRs
+        - Issue-based dependency tracking
+        - Configurable chain length and time windows
+        - DAG-based topological ordering of dependencies
 
 **🎵 Fine Tuning Dataset Construction**
 * `build_dataset_ft.py`
