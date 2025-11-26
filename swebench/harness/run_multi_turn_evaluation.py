@@ -234,23 +234,11 @@ def main(chains_path: str, run_id: str, max_workers: int):
         client=client, dataset=env_specs, force_rebuild=False, max_workers=max_workers
     )
     if failed_builds:
-        failed_env_keys = {payload[0].env_image_key for payload in failed_builds}
-        print(
-            f"WARNING: Failed to build {len(failed_env_keys)} environment images. Chains requiring these environments will be skipped."
-        )
-        # Filter out chains that depend on failed environment builds
-        chains = [
-            chain
-            for chain in chains
-            if make_test_spec(chain["task_instances"][0]).env_image_key
-            not in failed_env_keys
-        ]
+        raise Exception(f"Failed to build {len(failed_builds)} environment images.")
 
-    if not chains:
-        print("No chains left to evaluate after environment build failures.")
-        return
-
-    print("Environment images are ready. Starting chain evaluation...")
+    print(
+        f"{len(successful_builds)} environment images are ready. Starting chain evaluation..."
+    )
 
     # 5. Loop through each chain and run it
     for chain in tqdm(chains, desc="Evaluating chains"):

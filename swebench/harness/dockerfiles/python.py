@@ -10,6 +10,7 @@ git \
 build-essential \
 libffi-dev \
 libtiff-dev \
+libmemcached-dev \
 python3 \
 python3-pip \
 python-is-python3 \
