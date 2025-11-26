@@ -492,7 +492,7 @@ def main(
                 logger.info(f"Reached max cost limit ({max_cost}$). Stopping.")
                 break
 
-    logger.info(f"Done! Total cost: {total_cost:.4f}$")
+    logger.info(f"Done! Total cost: ${total_cost:.4f}")
     logger.info(f"Predictions saved to: {output_path}")
 
 
