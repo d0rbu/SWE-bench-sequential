@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 
-# Complete pipeline: Collect PRs, generate task instances, and build chains
+# Complete pipeline: Collect PRs, generate task instances, add versioning, and build chains
 #
 # This script is a superset of run_get_tasks_pipeline.sh that also builds chains.
 # It performs the full workflow:
 #   1. Clone repository (if needed)
 #   2. Collect PR data from GitHub
 #   3. Convert PRs to task instances
-#   4. Build chains using DAG-based dependency analysis
+#   4. Add version information to task instances
+#   5. Build chains using DAG-based dependency analysis
 #
 # Usage:
 #   ./run_build_chains_pipeline.sh <repo_owner/repo_name> [github_token]
@@ -51,9 +52,10 @@ fi
 REPOS_DIR="repos"
 PRS_DIR="prs"
 TASKS_DIR="tasks"
+TASKS_VERSIONED_DIR="tasks-versioned"
 CHAINS_DIR="chains"
 
-mkdir -p "$REPOS_DIR" "$PRS_DIR" "$TASKS_DIR" "$CHAINS_DIR"
+mkdir -p "$REPOS_DIR" "$PRS_DIR" "$TASKS_DIR" "$TASKS_VERSIONED_DIR" "$CHAINS_DIR"
 
 echo "════════════════════════════════════════════════════════════"
 echo "  Complete Pipeline for $REPO"
@@ -61,7 +63,7 @@ echo "════════════════════════�
 echo ""
 
 # Step 1: Clone repository if it doesn't exist
-echo "📦 Step 1/4: Repository Setup"
+echo "📦 Step 1/5: Repository Setup"
 REPO_PATH="$REPOS_DIR/$REPO_NAME"
 if [ ! -d "$REPO_PATH" ]; then
     echo "   Cloning $REPO to $REPO_PATH..."
@@ -73,7 +75,7 @@ fi
 echo ""
 
 # Step 2: Collect PR data from GitHub
-echo "🔍 Step 2/4: Collecting PR Data from GitHub"
+echo "🔍 Step 2/5: Collecting PR Data from GitHub"
 PRS_FILE="$PRS_DIR/$REPO_NAME-prs.jsonl"
 if [ -n "$GITHUB_TOKEN" ]; then
     echo "   Using provided GitHub token"
@@ -86,7 +88,7 @@ echo "   ✅ PR data saved to $PRS_FILE"
 echo ""
 
 # Step 3: Convert PRs to task instances
-echo "🔧 Step 3/4: Converting PRs to Task Instances"
+echo "🔧 Step 3/5: Converting PRs to Task Instances"
 TASKS_FILE="$TASKS_DIR/$REPO_NAME-task-instances.jsonl"
 if [ ! -f "$TASKS_FILE" ]; then
     echo "   Building task instances..."
@@ -101,18 +103,36 @@ else
 fi
 echo ""
 
-# Step 4: Build chains from task instances
-echo "🔗 Step 4/4: Building Chains with DAG Analysis"
+# Step 4: Add version information to task instances
+echo "📌 Step 4/5: Adding Version Information"
+# Output filename follows get_versions.py convention: {input_basename}_versions.json
+TASKS_VERSIONED_FILE="$TASKS_VERSIONED_DIR/${REPO_NAME}-task-instances_versions.json"
+if [ ! -f "$TASKS_VERSIONED_FILE" ]; then
+    echo "   Retrieving version information from GitHub..."
+    uv run python ../versioning/get_versions.py \
+        --instances_path "$TASKS_FILE" \
+        --retrieval_method github \
+        --output_dir "$TASKS_VERSIONED_DIR" \
+        --num_workers 4
+    echo "   ✅ Versioned task instances saved to $TASKS_VERSIONED_FILE"
+else
+    echo "   ✅ Versioned task instances already exist at $TASKS_VERSIONED_FILE"
+fi
+echo ""
+
+# Step 5: Build chains from versioned task instances
+echo "🔗 Step 5/5: Building Chains with DAG Analysis"
 CHAINS_FILE="$CHAINS_DIR/$REPO_NAME-chains.jsonl"
 echo "   Configuration:"
 echo "     - Repository: $REPO_PATH"
+echo "     - Input: $TASKS_VERSIONED_FILE (with version info)"
 echo "     - Num chains: 10"
 echo "     - Chain length: 2-5"
 echo "     - Blame threshold: 0.05"
 echo "     - Time window: 6 months"
 
 uv run python build_chains_pipeline.py \
-    --input_file "$TASKS_FILE" \
+    --input_file "$TASKS_VERSIONED_FILE" \
     --output_file "$CHAINS_FILE" \
     --num_chains 10 \
     --min_chain_length 2 \
@@ -127,7 +147,8 @@ echo "  ✅ Pipeline Complete!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "Generated files:"
-echo "  📄 PRs:           $PRS_FILE"
-echo "  📝 Task instances: $TASKS_FILE"
-echo "  🔗 Chains:        $CHAINS_FILE"
+echo "  📄 PRs:              $PRS_FILE"
+echo "  📝 Task instances:   $TASKS_FILE"
+echo "  📌 Versioned tasks:  $TASKS_VERSIONED_FILE"
+echo "  🔗 Chains:           $CHAINS_FILE"
 echo ""

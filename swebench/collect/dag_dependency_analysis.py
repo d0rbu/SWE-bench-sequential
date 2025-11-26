@@ -29,7 +29,11 @@ PRSampler = Callable[[List[int], "DependencyDAG", Set[str], Optional[int]], int]
 
 @dataclass
 class PRNode:
-    """Represents a PR in the dependency DAG."""
+    """Represents a PR in the dependency DAG.
+
+    All fields from the original task instance are preserved in the task_instance
+    dictionary, including version information if present (e.g., from get_versions.py).
+    """
 
     pr_number: int
     instance_id: str
@@ -40,7 +44,8 @@ class PRNode:
         str
     ]  # files before PR (deleted files, old names of renames)
     modified_files_post: Set[str]  # files after PR (new files, new names of renames)
-    task_instance: Dict[str, Any]
+    version: Optional[str]  # version info from get_versions.py, if available
+    task_instance: Dict[str, Any]  # full task instance with all original fields
 
 
 @dataclass
@@ -287,7 +292,8 @@ def build_dependency_dag(
             issues=issues,
             modified_files_pre=modified_files_pre,
             modified_files_post=modified_files_post,
-            task_instance=instance,
+            version=instance.get("version"),  # version info from get_versions.py
+            task_instance=instance,  # full instance preserved with all fields
         )
         pr_nodes.append(node)
         dag.add_node(node)

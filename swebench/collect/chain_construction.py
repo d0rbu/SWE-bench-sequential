@@ -14,17 +14,16 @@ import json
 import logging
 import time
 from collections import Counter
+from datetime import datetime
 from itertools import pairwise
 from typing import Any, Dict, List, Optional
-from datetime import datetime
-
 
 # Import DAG-based dependency analysis
 from swebench.collect.dag_dependency_analysis import (
-    build_dependency_dag,
-    sample_chains_from_dag,
-    file_coverage_sampler,
     PRSampler,
+    build_dependency_dag,
+    file_coverage_sampler,
+    sample_chains_from_dag,
 )
 
 logging.basicConfig(
@@ -515,31 +514,68 @@ def load_chains_from_jsonl(input_file: str) -> List[Chain]:
     return chains
 
 
+def load_task_instances(input_file: str) -> List[Dict[str, Any]]:
+    """
+    Load task instances from a file, supporting both JSON and JSONL formats.
+
+    The format is auto-detected based on file extension:
+    - .jsonl or .jsonl.all: JSONL format (one JSON object per line)
+    - .json or other: JSON format (single array of objects)
+
+    All fields from the input instances are preserved, including:
+    - version: Version information added by get_versions.py
+    - repo, pull_number, instance_id, base_commit, patch, etc.
+
+    Args:
+        input_file: Path to input file (JSON or JSONL)
+
+    Returns:
+        List of task instance dictionaries with all fields preserved
+    """
+    task_instances = []
+
+    if any(input_file.endswith(ext) for ext in [".jsonl", ".jsonl.all"]):
+        # JSONL format
+        with open(input_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    instance = json.loads(line)
+                    task_instances.append(instance)
+    else:
+        # JSON format (single array)
+        with open(input_file, "r") as f:
+            task_instances = json.load(f)
+
+    return task_instances
+
+
 def convert_single_instances_to_chains(
     input_file: str, output_file: str, **kwargs
 ) -> None:
     """
-    Convert a JSONL file of single task instances to chains using DAG-based analysis.
+    Convert a file of single task instances to chains using DAG-based analysis.
+
+    Supports both JSON and JSONL input formats. All task instance fields are
+    preserved in the output chains, including version information if present.
 
     Args:
-        input_file: Path to input JSONL file with single instances
+        input_file: Path to input file (JSON or JSONL) with single instances
         output_file: Path to output JSONL file with chains
         **kwargs: Additional arguments to pass to build_chains_from_repository_data
-    """
-    # Load single instances
-    task_instances = []
 
-    with open(input_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                instance = json.loads(line)
-                task_instances.append(instance)
+    Note:
+        If task instances contain a 'version' field (e.g., from get_versions.py),
+        this information is preserved in the chain output. The chain metadata
+        does not explicitly track versions, but all original task instance
+        fields are maintained.
+    """
+    # Load single instances (supports both JSON and JSONL)
+    task_instances = load_task_instances(input_file)
 
     # Build chains using DAG-based analysis
-    chains = build_chains_from_repository_data(
-        task_instances, **kwargs
-    )
+    # All task instance fields (including 'version') are preserved
+    chains = build_chains_from_repository_data(task_instances, **kwargs)
 
     # Save chains
     save_chains_to_jsonl(chains, output_file)
