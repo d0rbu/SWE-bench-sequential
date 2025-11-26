@@ -68,7 +68,7 @@ MODEL_COST_PER_INPUT = {
     "claude-3-opus-20240229": 0.000015,
     "claude-3-5-sonnet-20241022": 0.000003,
     "claude-3-sonnet-20240229": 0.000003,
-    "claude-3-haiku-20240307": 0.00000025,
+    "claude-3-haiku-20240307": 0.000000125,
     "gpt-3.5-turbo-16k-0613": 0.0000015,
     "gpt-3.5-turbo-0613": 0.0000015,
     "gpt-3.5-turbo-1106": 0.000001,
@@ -94,7 +94,7 @@ MODEL_COST_PER_OUTPUT = {
     "claude-3-opus-20240229": 0.000075,
     "claude-3-5-sonnet-20241022": 0.000015,
     "claude-3-sonnet-20240229": 0.000015,
-    "claude-3-haiku-20240307": 0.00000125,
+    "claude-3-haiku-20240307": 0.000000625,
     "claude-sonnet-4-5-20250929": 0.000015,
     "claude-haiku-4-5-20251001": 0.000005,
     "claude-opus-4-5-20251101": 0.000025,
@@ -335,7 +335,7 @@ def run_chain_inference(
             )
 
             logger.info(
-                f"  Turn {turn_idx} ({instance_id}): Generated patch ({cost:.4f}$)"
+                f"  Turn {turn_idx} ({instance_id}): Generated patch (${cost:.4f})"
             )
 
         except Exception as e:
