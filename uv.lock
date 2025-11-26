@@ -654,7 +654,7 @@ name = "exceptiongroup"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0b/9f/a65090624ecf468cdca03533906e7c69ed7588582240cfe7cc9e770b50eb/exceptiongroup-1.3.0.tar.gz", hash = "sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88", size = 29749, upload-time = "2025-05-10T17:42:51.123Z" }
 wheels = [
@@ -2983,6 +2983,7 @@ wheels = [
 name = "swebench"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "beautifulsoup4" },
     { name = "chardet" },
     { name = "datasets" },
@@ -2990,6 +2991,7 @@ dependencies = [
     { name = "ghapi" },
     { name = "gitpython" },
     { name = "modal" },
+    { name = "openai" },
     { name = "pre-commit" },
     { name = "python-dotenv" },
     { name = "requests" },
@@ -3040,6 +3042,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.71.0" },
     { name = "anthropic", marker = "extra == 'datasets'" },
     { name = "anthropic", marker = "extra == 'inference'" },
     { name = "beautifulsoup4" },
@@ -3059,6 +3062,7 @@ requires-dist = [
     { name = "mkdocstrings", marker = "extra == 'docs'" },
     { name = "mkdocstrings-python", marker = "extra == 'docs'" },
     { name = "modal" },
+    { name = "openai", specifier = ">=2.6.0" },
     { name = "openai", marker = "extra == 'datasets'" },
     { name = "openai", marker = "extra == 'inference'" },
     { name = "peft", marker = "extra == 'inference'" },
