@@ -182,6 +182,17 @@ SPECS_DJANGO.update(
         for k in ["5.0", "5.1", "5.2"]
     }
 )
+SPECS_DJANGO.update(
+    {
+        k: {
+            "python": "3.12",
+            "packages": "requirements.txt",
+            "install": "python -m pip install -e .",
+            "test_cmd": TEST_DJANGO,
+        }
+        for k in ["6.0", "6.1"]
+    }
+)
 SPECS_DJANGO["1.9"]["test_cmd"] = TEST_DJANGO_NO_PARALLEL
 
 SPECS_REQUESTS = {
