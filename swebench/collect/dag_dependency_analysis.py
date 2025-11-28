@@ -22,6 +22,9 @@ import docker
 import unidiff
 from tqdm import tqdm
 
+from swebench.harness.docker_utils import cleanup_container
+from swebench.harness.test_spec.test_spec import make_test_spec
+
 logger = logging.getLogger(__name__)
 
 
@@ -556,125 +559,119 @@ def validate_and_apply_candidate(
     )
     from swebench.harness.docker_utils import copy_to_container, exec_run_with_timeout
     from swebench.harness.grading import get_logs_eval
-    from swebench.harness.test_spec.test_spec import make_test_spec
     
     validation_logger = context.validation_logger
     container = context.container
     log_dir = context.log_dir
     
-    try:
-        validation_logger.info(
-            f"Validating candidate {candidate.pr_number} "
-            f"(chain length: {len(context.applied_nodes)})"
-        )
-        
-        # Get the patch
-        patch = candidate.task_instance.get("patch", "")
-        if not patch or not patch.strip():
-            validation_logger.warning(f"Candidate {candidate.pr_number} has empty patch")
-            return False
-        
-        # Write patch to temporary file and copy to container
-        patch_file = log_dir / f"patch_{len(context.applied_nodes)}_{candidate.pr_number}.diff"
-        patch_file.write_text(patch)
-        copy_to_container(container, patch_file, PurePosixPath(DOCKER_PATCH))
-        
-        # Try to apply patch
-        validation_logger.info(f"Applying patch for PR {candidate.pr_number}")
-        applied = False
-        
-        git_apply_cmds = [
-            "git apply --verbose",
-            "git apply --verbose --reject",
-        ]
-        
-        for git_apply_cmd in git_apply_cmds:
-            result = container.exec_run(
-                f"{git_apply_cmd} {DOCKER_PATCH}",
-                workdir=DOCKER_WORKDIR,
-                user=DOCKER_USER,
-            )
-            if result.exit_code == 0:
-                validation_logger.info(
-                    f"Patch applied successfully with: {git_apply_cmd}"
-                )
-                applied = True
-                break
-            else:
-                validation_logger.debug(
-                    f"Failed to apply with {git_apply_cmd}: "
-                    f"{result.output.decode(UTF8)}"
-                )
-        
-        if not applied:
-            validation_logger.warning(
-                f"Failed to apply patch for PR {candidate.pr_number}"
-            )
-            return False
-        
-        # Run tests - only FAIL_TO_PASS tests for the candidate
-        validation_logger.info(
-            f"Running FAIL_TO_PASS tests for candidate {candidate.pr_number}"
-        )
-        
-        # Create TestSpec for the candidate to get the right test configuration
-        test_spec = make_test_spec(candidate.task_instance)
-        
-        # Create eval script
-        eval_file = log_dir / f"eval_{len(context.applied_nodes)}_{candidate.pr_number}.sh"
-        eval_file.write_text(test_spec.eval_script)
-        copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
-        
-        # Execute tests
-        test_output_file = log_dir / f"test_output_{len(context.applied_nodes)}_{candidate.pr_number}.txt"
-        test_output, timed_out, total_runtime = exec_run_with_timeout(
-            container, "/bin/bash /eval.sh", timeout
-        )
-        
-        if timed_out:
-            validation_logger.warning(
-                f"Tests timed out after {timeout} seconds"
-            )
-            return False
-        
-        # Write test output
-        test_output_file.write_text(test_output)
-        validation_logger.info(f"Tests completed in {total_runtime:.2f}s")
-        
-        # Parse test results
-        status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
-        
-        if not tests_ran:
-            validation_logger.warning("Tests did not run successfully")
-            return False
-        
-        # Check that all FAIL_TO_PASS tests passed
-        fail_to_pass_tests = test_spec.FAIL_TO_PASS
-        if not fail_to_pass_tests:
-            validation_logger.warning("No FAIL_TO_PASS tests defined")
-            return False
-        
-        all_passed = True
-        for test_case in fail_to_pass_tests:
-            test_status = status_map.get(test_case, "FAILED")
-            if test_status not in ["PASSED", "XFAIL"]:
-                validation_logger.warning(
-                    f"FAIL_TO_PASS test {test_case} did not pass: {test_status}"
-                )
-                all_passed = False
-        
-        if all_passed:
-            validation_logger.info(
-                f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number}"
-            )
-            # Add to applied nodes since validation succeeded
-            context.applied_nodes.append(candidate)
-        
-        return all_passed
-        
-    except Exception as e:
-        validation_logger.error(f"Validation error: {e}")
+    validation_logger.info(
+        f"Validating candidate {candidate.pr_number} "
+        f"(chain length: {len(context.applied_nodes)})"
+    )
+    
+    # Get the patch
+    patch = candidate.task_instance.get("patch", "")
+    if not patch or not patch.strip():
+        validation_logger.warning(f"Candidate {candidate.pr_number} has empty patch")
         return False
+    
+    # Write patch to temporary file and copy to container
+    patch_file = log_dir / f"patch_{len(context.applied_nodes)}_{candidate.pr_number}.diff"
+    patch_file.write_text(patch)
+    copy_to_container(container, patch_file, PurePosixPath(DOCKER_PATCH))
+    
+    # Try to apply patch
+    validation_logger.info(f"Applying patch for PR {candidate.pr_number}")
+    applied = False
+    
+    git_apply_cmds = [
+        "git apply --verbose",
+        "git apply --verbose --reject",
+    ]
+    
+    for git_apply_cmd in git_apply_cmds:
+        result = container.exec_run(
+            f"{git_apply_cmd} {DOCKER_PATCH}",
+            workdir=DOCKER_WORKDIR,
+            user=DOCKER_USER,
+        )
+        if result.exit_code == 0:
+            validation_logger.info(
+                f"Patch applied successfully with: {git_apply_cmd}"
+            )
+            applied = True
+            break
+        else:
+            validation_logger.debug(
+                f"Failed to apply with {git_apply_cmd}: "
+                f"{result.output.decode(UTF8)}"
+            )
+    
+    if not applied:
+        validation_logger.warning(
+            f"Failed to apply patch for PR {candidate.pr_number}"
+        )
+        return False
+    
+    # Run tests - only FAIL_TO_PASS tests for the candidate
+    validation_logger.info(
+        f"Running FAIL_TO_PASS tests for candidate {candidate.pr_number}"
+    )
+    
+    # Create TestSpec for the candidate to get the right test configuration
+    test_spec = make_test_spec(candidate.task_instance)
+    
+    # Create eval script
+    eval_file = log_dir / f"eval_{len(context.applied_nodes)}_{candidate.pr_number}.sh"
+    eval_file.write_text(test_spec.eval_script)
+    copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
+    
+    # Execute tests
+    test_output_file = log_dir / f"test_output_{len(context.applied_nodes)}_{candidate.pr_number}.txt"
+    test_output, timed_out, total_runtime = exec_run_with_timeout(
+        container, "/bin/bash /eval.sh", timeout
+    )
+    
+    if timed_out:
+        validation_logger.warning(
+            f"Tests timed out after {timeout} seconds"
+        )
+        return False
+    
+    # Write test output
+    test_output_file.write_text(test_output)
+    validation_logger.info(f"Tests completed in {total_runtime:.2f}s")
+    
+    # Parse test results
+    status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
+    
+    if not tests_ran:
+        validation_logger.warning("Tests did not run successfully")
+        return False
+    
+    # Check that all FAIL_TO_PASS tests passed
+    fail_to_pass_tests = test_spec.FAIL_TO_PASS
+    if not fail_to_pass_tests:
+        validation_logger.warning("No FAIL_TO_PASS tests defined")
+        return False
+    
+    all_passed = True
+    for test_case in fail_to_pass_tests:
+        test_status = status_map.get(test_case, "FAILED")
+        if test_status not in ["PASSED", "XFAIL"]:
+            validation_logger.warning(
+                f"FAIL_TO_PASS test {test_case} did not pass: {test_status}"
+            )
+            all_passed = False
+    
+    if all_passed:
+        validation_logger.info(
+            f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number}"
+        )
+        # Add to applied nodes since validation succeeded
+        context.applied_nodes.append(candidate)
+    
+    return all_passed
 
 
 def sample_chains_from_dag(
