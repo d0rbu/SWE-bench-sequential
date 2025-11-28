@@ -22,6 +22,7 @@ import docker
 import unidiff
 from tqdm import tqdm
 
+from swebench.harness.docker_build import build_container, setup_logger
 from swebench.harness.docker_utils import cleanup_container
 from swebench.harness.test_spec.test_spec import make_test_spec
 
@@ -480,7 +481,7 @@ def create_validation_context(
     start_node: PRNode,
     client: docker.DockerClient,
     log_dir: Path,
-) -> Optional[ChainValidationContext]:
+) -> ChainValidationContext:
     """
     Create a validation context with a Docker container for a chain.
     
@@ -490,11 +491,8 @@ def create_validation_context(
         log_dir: Directory for validation logs
         
     Returns:
-        ChainValidationContext if successful, None otherwise
+        ChainValidationContext for the created container
     """
-    from swebench.harness.docker_build import build_container, setup_logger
-    from swebench.harness.test_spec.test_spec import make_test_spec
-    
     # Create TestSpec for the start node (this defines the test environment)
     test_spec = make_test_spec(start_node.task_instance)
     
@@ -504,32 +502,28 @@ def create_validation_context(
         log_file
     )
     
-    try:
-        validation_logger.info(
-            f"Creating validation context for chain starting with PR {start_node.pr_number}"
-        )
-        
-        container = build_container(
-            test_spec,
-            client,
-            run_id="chain_validation",
-            logger=validation_logger,
-            rm_image=False,
-            force_rebuild=False,
-        )
-        container.start()
-        validation_logger.info(f"Container started: {container.id}")
-        
-        return ChainValidationContext(
-            container=container,
-            client=client,
-            log_dir=log_dir,
-            validation_logger=validation_logger,
-            applied_nodes=[],
-        )
-    except Exception as e:
-        validation_logger.error(f"Failed to create validation context: {e}")
-        return None
+    validation_logger.info(
+        f"Creating validation context for chain starting with PR {start_node.pr_number}"
+    )
+    
+    container = build_container(
+        test_spec,
+        client,
+        run_id="chain_validation",
+        logger=validation_logger,
+        rm_image=False,
+        force_rebuild=False,
+    )
+    container.start()
+    validation_logger.info(f"Container started: {container.id}")
+    
+    return ChainValidationContext(
+        container=container,
+        client=client,
+        log_dir=log_dir,
+        validation_logger=validation_logger,
+        applied_nodes=[],
+    )
 
 
 def validate_and_apply_candidate(
@@ -764,14 +758,6 @@ def sample_chains_from_dag(
                 docker_client,
                 log_dir,
             )
-            
-            if validation_context is None:
-                logger.warning(
-                    f"Failed to create validation context for chain starting with {best_pr}"
-                )
-                # Remove from leaf_prs and try another
-                leaf_prs = [pr for pr in leaf_prs if pr != best_pr]
-                continue
 
         try:
             while current_pr and len(chain) < max_chain_length:
