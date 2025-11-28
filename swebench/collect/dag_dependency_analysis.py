@@ -16,22 +16,29 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, Optional, Set
 
 import docker
 import unidiff
 from tqdm import tqdm
 
+from swebench.harness.constants import (
+    DOCKER_PATCH,
+    DOCKER_USER,
+    DOCKER_WORKDIR,
+    UTF8,
+)
 from swebench.harness.docker_build import build_container, setup_logger
-from swebench.harness.docker_utils import cleanup_container
+from swebench.harness.docker_utils import cleanup_container, copy_to_container, exec_run_with_timeout
+from swebench.harness.grading import get_logs_eval
 from swebench.harness.test_spec.test_spec import make_test_spec
 
 logger = logging.getLogger(__name__)
 
 
 # Type alias for PR sampler function
-# Takes: (leaf_prs: List[int], dag: DependencyDAG, covered_files: Set[str], seed: Optional[int]) -> int
-PRSampler = Callable[[List[int], "DependencyDAG", Set[str], Optional[int]], int]
+# Takes: (leaf_prs: list[int], dag: DependencyDAG, covered_files: Set[str], seed: Optional[int]) -> int
+PRSampler = Callable[[list[int], "DependencyDAG", Set[str], Optional[int]], int]
 
 
 @dataclass
@@ -76,11 +83,11 @@ class DependencyDAG:
             self.edges[from_pr] = {}
         self.edges[from_pr][to_pr] = weight
 
-    def get_dependencies(self, pr_number: int) -> List[int]:
+    def get_dependencies(self, pr_number: int) -> list[int]:
         """Get PRs that this PR depends on."""
         return list(self.edges.get(pr_number, {}).keys())
 
-    def get_dependents(self, pr_number: int) -> List[int]:
+    def get_dependents(self, pr_number: int) -> list[int]:
         """Get PRs that depend on this PR."""
         return [
             pr for pr, dependencies in self.edges.items() if pr_number in dependencies
@@ -100,7 +107,7 @@ class DependencyDAG:
             if dependency == pr_number
         }
 
-    def get_topological_order(self) -> List[int]:
+    def get_topological_order(self) -> list[int]:
         """Return PRs in topological order (dependencies before dependents)."""
         in_degree = {pr: 0 for pr in self.nodes}
         for deps in self.edges.values():
@@ -247,7 +254,7 @@ def calculate_file_overlap_weight(target_pr: PRNode, candidate_pr: PRNode) -> fl
 
 
 def build_dependency_dag(
-    task_instances: List[Dict[str, Any]],
+    task_instances: list[Dict[str, Any]],
     time_window_months: int = 6,
     file_overlap_threshold: float = 0.0,
 ) -> DependencyDAG:
@@ -392,7 +399,7 @@ def build_dependency_dag(
 
 
 def file_coverage_sampler(
-    leaf_prs: List[int],
+    leaf_prs: list[int],
     dag: DependencyDAG,
     covered_files: Set[str],
     seed: Optional[int] = None,
@@ -437,7 +444,7 @@ def file_coverage_sampler(
 
 
 def random_sampler(
-    leaf_prs: List[int],
+    leaf_prs: list[int],
     dag: DependencyDAG,
     covered_files: Set[str],
     seed: Optional[int] = None,
@@ -464,15 +471,14 @@ def random_sampler(
 class ChainValidationContext:
     """Context for validating a chain, reusing Docker container across candidates."""
     
-    container: Any  # docker.models.containers.Container
+    container: docker.models.containers.Container
     client: docker.DockerClient
     log_dir: Path
-    validation_logger: Any  # logging.Logger
-    applied_nodes: List[PRNode]
+    validation_logger: logging.Logger
+    applied_nodes: list[PRNode]
     
     def cleanup(self) -> None:
         """Clean up the Docker container."""
-        from swebench.harness.docker_utils import cleanup_container
         if self.container:
             cleanup_container(self.client, self.container, self.validation_logger)
 
@@ -545,15 +551,6 @@ def validate_and_apply_candidate(
     Returns:
         True if candidate is valid (patch applies and tests pass), False otherwise
     """
-    from swebench.harness.constants import (
-        DOCKER_PATCH,
-        DOCKER_USER,
-        DOCKER_WORKDIR,
-        UTF8,
-    )
-    from swebench.harness.docker_utils import copy_to_container, exec_run_with_timeout
-    from swebench.harness.grading import get_logs_eval
-    
     validation_logger = context.validation_logger
     container = context.container
     log_dir = context.log_dir
@@ -677,7 +674,7 @@ def sample_chains_from_dag(
     seed: Optional[int] = None,
     validate_chains: bool = True,
     validation_timeout: int = 1800,
-) -> List[List[Dict[str, Any]]]:
+) -> list[list[Dict[str, Any]]]:
     """
     Sample diverse chains from the dependency DAG with optional validation.
 
