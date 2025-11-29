@@ -783,7 +783,7 @@ def sample_chains_from_dag(
                         break
             
             if best_pr is None:
-                logger.warning("No valid starting PR found for chain validation")
+                logger.error("No valid starting PR found for chain validation")
                 continue
         else:
             # No validation - just use sampler
@@ -800,18 +800,13 @@ def sample_chains_from_dag(
                 # Validate and apply current node if validation is enabled
                 if validate_chains:
                     assert validation_context, "Validation context must exist when validate_chains=True"
-                    # For the first node, it should already be validated and applied
-                    if not chain_nodes:
-                        # First node already validated above
-                        pass
-                    else:
-                        # Subsequent nodes should always validate (we pre-validate them)
-                        success = validate_and_apply_candidate(
-                            validation_context,
-                            node,
-                            validation_timeout,
-                        )
-                        assert success, f"Pre-validated node {current_pr} failed validation"
+                    # All nodes should validate (including first node for consistency)
+                    success = validate_and_apply_candidate(
+                        validation_context,
+                        node,
+                        validation_timeout,
+                    )
+                    assert success, f"Pre-validated node {current_pr} failed validation"
                 
                 # Add node to chain
                 chain_nodes.append(node)
