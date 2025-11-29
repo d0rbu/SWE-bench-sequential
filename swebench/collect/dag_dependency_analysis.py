@@ -734,128 +734,146 @@ def sample_chains_from_dag(
             )
             break
 
-        # Use the injected sampler to pick starting PR
-        best_pr = sampler(leaf_prs, dag, covered_files, seed)
-
-        # Build chain by following dependencies with validation
-        chain = []
-        chain_nodes = []  # Track PRNodes for validation
-        current_pr = best_pr
+        # Find a valid starting PR if validation is enabled
         validation_context = None
-        
-        # Create validation context if validation is enabled
-        if validate_chains and docker_client:
-            # Create a temporary directory for this chain's validation logs
-            temp_dir = tempfile.mkdtemp(prefix=f"chain_validation_{i}_")
-            log_dir = Path(temp_dir)
+        if validate_chains:
+            assert docker_client, "Docker client must be provided when validate_chains=True"
             
-            start_node = dag.nodes[best_pr]
-            validation_context = create_validation_context(
-                start_node,
-                docker_client,
-                log_dir,
-            )
+            # Try starting PRs until we find one that validates
+            best_pr = None
+            for _ in range(len(leaf_prs)):  # Avoid infinite loop
+                candidate_pr = sampler(leaf_prs, dag, covered_files, seed)
+                
+                # Create validation context for this candidate
+                temp_dir = tempfile.mkdtemp(prefix=f"chain_validation_{i}_")
+                log_dir = Path(temp_dir)
+                start_node = dag.nodes[candidate_pr]
+                
+                try:
+                    validation_context = create_validation_context(
+                        start_node,
+                        docker_client,
+                        log_dir,
+                    )
+                    
+                    # Validate the starting node
+                    if validate_and_apply_candidate(
+                        validation_context,
+                        start_node,
+                        validation_timeout,
+                    ):
+                        best_pr = candidate_pr
+                        logger.info(f"Starting PR {best_pr} validated successfully")
+                        break
+                    else:
+                        logger.debug(f"Starting PR {candidate_pr} failed validation")
+                        validation_context.cleanup()
+                        validation_context = None
+                        # Remove failed candidate and try another
+                        leaf_prs = [pr for pr in leaf_prs if pr != candidate_pr]
+                        if not leaf_prs:
+                            break
+                except Exception as e:
+                    logger.warning(f"Failed to create validation context for PR {candidate_pr}: {e}")
+                    if validation_context:
+                        validation_context.cleanup()
+                        validation_context = None
+                    leaf_prs = [pr for pr in leaf_prs if pr != candidate_pr]
+                    if not leaf_prs:
+                        break
+            
+            if best_pr is None:
+                logger.warning("No valid starting PR found for chain validation")
+                continue
+        else:
+            # No validation - just use sampler
+            best_pr = sampler(leaf_prs, dag, covered_files, seed)
+
+        # Build chain by following dependencies
+        chain_nodes = []
+        current_pr = best_pr
 
         try:
-            while current_pr and len(chain) < max_chain_length:
+            while current_pr and len(chain_nodes) < max_chain_length:
                 node = dag.nodes[current_pr]
                 
                 # Validate and apply current node if validation is enabled
-                if validate_chains and validation_context:
-                    if not validate_and_apply_candidate(
-                        validation_context,
-                        node,
-                        validation_timeout,
-                    ):
-                        if not chain:
-                            # First node failed validation
-                            logger.warning(
-                                f"Starting node {current_pr} failed validation, skipping"
-                            )
-                            # Remove from leaf_prs and try another
-                            leaf_prs = [pr for pr in leaf_prs if pr != current_pr]
-                            break
-                        else:
-                            # Subsequent node failed - try alternatives
-                            logger.debug(
-                                f"Candidate {current_pr} failed validation at position {len(chain)}"
-                            )
-                            # This shouldn't happen since we validate before setting current_pr
-                            # But handle it gracefully
-                            break
+                if validate_chains:
+                    assert validation_context, "Validation context must exist when validate_chains=True"
+                    # For the first node, it should already be validated and applied
+                    if not chain_nodes:
+                        # First node already validated above
+                        pass
+                    else:
+                        # Subsequent nodes should always validate (we pre-validate them)
+                        success = validate_and_apply_candidate(
+                            validation_context,
+                            node,
+                            validation_timeout,
+                        )
+                        assert success, f"Pre-validated node {current_pr} failed validation"
                 
-                # Add node to chain (it's validated or validation is disabled)
-                chain.append(node.task_instance)
+                # Add node to chain
                 chain_nodes.append(node)
                 used_prs.add(current_pr)
                 covered_files.update(node.modified_files_pre | node.modified_files_post)
 
                 # Find next node if we have room for more
-                if len(chain) < max_chain_length:
-                    dependent_weights = dag.get_dependent_weights(current_pr)
-                    
-                    if not dependent_weights:
-                        # No more dependents, end chain
-                        break
-                    
-                    if not validate_chains:
-                        # No validation - just follow strongest dependent
-                        best_dep = max(dependent_weights, key=dependent_weights.get)
-                        current_pr = int(best_dep)
-                    else:
-                        # With validation - find a valid dependent
-                        # Sort candidates by weight (descending)
-                        candidates = sorted(
-                            dependent_weights.items(),
-                            key=lambda x: x[1],
-                            reverse=True
-                        )
-                        
-                        # Try candidates in order of weight, with blacklisting
-                        blacklist = set()
-                        validated_candidate = None
-                        
-                        for candidate_pr, weight in candidates:
-                            if candidate_pr in blacklist:
-                                continue
-                            
-                            candidate_node = dag.nodes[candidate_pr]
-                            logger.debug(
-                                f"Validating candidate {candidate_pr} "
-                                f"(weight: {weight:.2f}) for chain position {len(chain)}"
-                            )
-                            
-                            # Validate this candidate as the next node in the chain
-                            if validate_and_apply_candidate(
-                                validation_context,
-                                candidate_node,
-                                validation_timeout,
-                            ):
-                                validated_candidate = candidate_pr
-                                logger.info(
-                                    f"Candidate {candidate_pr} validated successfully"
-                                )
-                                break
-                            else:
-                                logger.debug(
-                                    f"Candidate {candidate_pr} failed validation, blacklisting"
-                                )
-                                blacklist.add(candidate_pr)
-                        
-                        if validated_candidate is None:
-                            logger.info(
-                                f"Could not find valid candidate after {current_pr}, "
-                                f"ending chain early at length {len(chain)}"
-                            )
-                            break
-                        
-                        # Use the validated candidate for next iteration
-                        current_pr = validated_candidate
-                else:
-                    # Reached max chain length
+                if len(chain_nodes) >= max_chain_length:
                     break
+                    
+                dependent_weights = dag.get_dependent_weights(current_pr)
+                if not dependent_weights:
+                    # No more dependents, end chain
+                    break
+                
+                if not validate_chains:
+                    # No validation - just follow strongest dependent
+                    best_dep = max(dependent_weights, key=dependent_weights.get)
+                    current_pr = int(best_dep)
+                    continue
+                
+                # With validation - find a valid dependent
+                # Sort candidates by weight (descending)
+                candidates = sorted(
+                    dependent_weights.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                
+                # Try candidates in order of weight
+                validated_candidate = None
+                for candidate_pr, weight in candidates:
+                    candidate_node = dag.nodes[candidate_pr]
+                    logger.debug(
+                        f"Validating candidate {candidate_pr} "
+                        f"(weight: {weight:.2f}) for chain position {len(chain_nodes)}"
+                    )
+                    
+                    # Validate this candidate as the next node in the chain
+                    if validate_and_apply_candidate(
+                        validation_context,
+                        candidate_node,
+                        validation_timeout,
+                    ):
+                        validated_candidate = candidate_pr
+                        logger.info(f"Candidate {candidate_pr} validated successfully")
+                        break
+                    else:
+                        logger.debug(f"Candidate {candidate_pr} failed validation")
+                
+                if validated_candidate is None:
+                    logger.info(
+                        f"Could not find valid candidate after {current_pr}, "
+                        f"ending chain early at length {len(chain_nodes)}"
+                    )
+                    break
+                
+                # Use the validated candidate for next iteration
+                current_pr = validated_candidate
 
-            # Only add if meets minimum length
+            # Convert chain_nodes to task instances and add if meets minimum length
+            chain = [node.task_instance for node in chain_nodes]
             if len(chain) >= min_chain_length:
                 chains.append(chain)
                 logger.info(
