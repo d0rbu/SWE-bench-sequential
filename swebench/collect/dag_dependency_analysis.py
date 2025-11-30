@@ -508,28 +508,32 @@ def create_validation_context(
         log_file
     )
     
-    validation_logger.info(
-        f"Creating validation context for chain starting with PR {start_node.pr_number}"
-    )
-    
-    container = build_container(
-        test_spec,
-        client,
-        run_id="chain_validation",
-        logger=validation_logger,
-        rm_image=False,
-        force_rebuild=False,
-    )
-    container.start()
-    validation_logger.info(f"Container started: {container.id}")
-    
-    return ChainValidationContext(
-        container=container,
-        client=client,
-        log_dir=log_dir,
-        validation_logger=validation_logger,
-        applied_nodes=[],
-    )
+    try:
+        validation_logger.info(
+            f"Creating validation context for chain starting with PR {start_node.pr_number}"
+        )
+        
+        container = build_container(
+            test_spec,
+            client,
+            run_id="chain_validation",
+            logger=validation_logger,
+            nocache=False,
+            force_rebuild=False,
+        )
+        container.start()
+        validation_logger.info(f"Container started: {container.id}")
+        
+        return ChainValidationContext(
+            container=container,
+            client=client,
+            log_dir=log_dir,
+            validation_logger=validation_logger,
+            applied_nodes=[],
+        )
+    except Exception as e:
+        validation_logger.error(f"Failed to create validation context: {e}")
+        return None
 
 
 def validate_and_apply_candidate(
