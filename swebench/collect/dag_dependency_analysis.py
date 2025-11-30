@@ -753,35 +753,26 @@ def sample_chains_from_dag(
                 log_dir = Path(temp_dir)
                 start_node = dag.nodes[candidate_pr]
                 
-                try:
-                    validation_context = create_validation_context(
-                        start_node,
-                        docker_client,
-                        log_dir,
-                    )
-                    
-                    # Validate the starting node
-                    if validate_and_apply_candidate(
-                        validation_context,
-                        start_node,
-                        validation_timeout,
-                    ):
-                        best_pr = candidate_pr
-                        logger.info(f"Starting PR {best_pr} validated successfully")
-                        break
-                    else:
-                        logger.debug(f"Starting PR {candidate_pr} failed validation")
-                        validation_context.cleanup()
-                        validation_context = None
-                        # Remove failed candidate and try another
-                        leaf_prs = [pr for pr in leaf_prs if pr != candidate_pr]
-                        if not leaf_prs:
-                            break
-                except Exception as e:
-                    logger.warning(f"Failed to create validation context for PR {candidate_pr}: {e}")
-                    if validation_context:
-                        validation_context.cleanup()
-                        validation_context = None
+                validation_context = create_validation_context(
+                    start_node,
+                    docker_client,
+                    log_dir,
+                )
+                
+                # Validate the starting node
+                if validate_and_apply_candidate(
+                    validation_context,
+                    start_node,
+                    validation_timeout,
+                ):
+                    best_pr = candidate_pr
+                    logger.info(f"Starting PR {best_pr} validated successfully")
+                    break
+                else:
+                    logger.debug(f"Starting PR {candidate_pr} failed validation")
+                    validation_context.cleanup()
+                    validation_context = None
+                    # Remove failed candidate and try another
                     leaf_prs = [pr for pr in leaf_prs if pr != candidate_pr]
                     if not leaf_prs:
                         break
