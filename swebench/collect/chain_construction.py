@@ -12,13 +12,17 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import tempfile
 import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from itertools import pairwise
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import docker
 
 # Import DAG-based dependency analysis
 from swebench.collect.dag_dependency_analysis import (
@@ -27,18 +31,6 @@ from swebench.collect.dag_dependency_analysis import (
     file_coverage_sampler,
     sample_chains_from_dag,
 )
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# Import additional dependencies for FAIL_TO_PASS computation
-import tempfile
-from pathlib import Path
-
-import docker
-
 from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, UTF8
 from swebench.harness.docker_build import build_container, setup_logger
 from swebench.harness.docker_utils import (
@@ -48,6 +40,11 @@ from swebench.harness.docker_utils import (
 )
 from swebench.harness.grading import get_logs_eval
 from swebench.harness.test_spec.test_spec import make_test_spec
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 class Chain:
@@ -605,8 +602,6 @@ def compute_fail_to_pass_for_instance(
         instance["PASS_TO_PASS"] = []
         return instance
 
-    logger.info(f"Computing FAIL_TO_PASS for instance {instance.get('instance_id')}")
-
     # Create Docker client if not provided
     if client is None:
         client = docker.from_env()
@@ -626,10 +621,16 @@ def compute_fail_to_pass_for_instance(
         try:
             # Build and start container
             compute_logger.info("Building container for FAIL_TO_PASS computation")
+            container_name = f"compute_fail_to_pass_{instance.get('instance_id')}"
+
+            # if container already exists, remove it
+            if client.containers.list(filters={"name": container_name}):
+                client.containers.get(container_name).remove(force=True)
+
             container = build_container(
                 test_spec,
                 client,
-                run_id="compute_fail_to_pass",
+                run_id=f"compute_fail_to_pass_{instance.get('instance_id')}",
                 logger=compute_logger,
                 nocache=False,
                 force_rebuild=False,
@@ -651,12 +652,13 @@ def compute_fail_to_pass_for_instance(
             )
 
             if result.exit_code != 0:
-                compute_logger.warning(
-                    f"Failed to apply test_patch: {result.output.decode(UTF8)}"
-                )
+                message = f"Failed to apply test_patch: {result.output.decode(UTF8)}"
+                compute_logger.warning(message)
+                logger.error(message)
                 # If test patch can't apply, we can't determine FAIL_TO_PASS
                 instance["FAIL_TO_PASS"] = []
                 instance["PASS_TO_PASS"] = []
+
                 return instance
 
             compute_logger.info("Test patch applied successfully")
@@ -672,9 +674,12 @@ def compute_fail_to_pass_for_instance(
             )
 
             if timed_out:
-                compute_logger.warning(f"Tests timed out after {timeout} seconds")
+                message = f"Tests timed out after {timeout} seconds"
+                compute_logger.warning(message)
+                logger.error(message)
                 instance["FAIL_TO_PASS"] = []
                 instance["PASS_TO_PASS"] = []
+
                 return instance
 
             # Write test output and parse results
@@ -686,9 +691,12 @@ def compute_fail_to_pass_for_instance(
             status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
 
             if not tests_ran:
-                compute_logger.warning("Tests did not run successfully")
+                message = "Tests did not run successfully"
+                compute_logger.warning(message)
+                logger.error(message)
                 instance["FAIL_TO_PASS"] = []
                 instance["PASS_TO_PASS"] = []
+
                 return instance
 
             # Tests that FAIL are FAIL_TO_PASS (they should pass after fix)
@@ -714,9 +722,12 @@ def compute_fail_to_pass_for_instance(
             return instance
 
         except Exception as e:
-            compute_logger.error(f"Error computing FAIL_TO_PASS: {e}", exc_info=True)
+            message = f"Error computing FAIL_TO_PASS: {e}"
+            compute_logger.error(message, exc_info=True)
+            logger.error(message)
             instance["FAIL_TO_PASS"] = []
             instance["PASS_TO_PASS"] = []
+
             return instance
 
         finally:
@@ -725,12 +736,14 @@ def compute_fail_to_pass_for_instance(
                 try:
                     cleanup_container(client, container, compute_logger)
                 except Exception as e:
-                    compute_logger.warning(f"Error cleaning up container: {e}")
+                    message = f"Error cleaning up container: {e}"
+                    compute_logger.warning(message)
+                    logger.warning(message)
 
 
 def compute_fail_to_pass_for_instances(
     instances: List[Dict[str, Any]],
-    max_workers: int = 20,
+    max_workers: int = 10,
     timeout: int = 1800,
 ) -> List[Dict[str, Any]]:
     """
@@ -751,12 +764,14 @@ def compute_fail_to_pass_for_instances(
     logging.getLogger("docker").setLevel(logging.WARNING)
     logging.getLogger("docker.utils.config").setLevel(logging.WARNING)
     logging.getLogger("docker.auth").setLevel(logging.WARNING)
-    
+
     # Progress update interval
     PROGRESS_UPDATE_INTERVAL = 10
-    
-    logger.info(f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers")
-    
+
+    logger.info(
+        f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers"
+    )
+
     # Track statistics
     success_count = 0
     failed_count = 0
@@ -769,7 +784,7 @@ def compute_fail_to_pass_for_instances(
         updated_instances = []
 
         for i, instance in enumerate(instances, 1):
-            instance_id = instance.get('instance_id')
+            instance_id = instance.get("instance_id")
             logger.info(f"[{i}/{len(instances)}] Processing {instance_id}")
 
             had_fail_to_pass_before = bool(instance.get("FAIL_TO_PASS"))
@@ -777,43 +792,43 @@ def compute_fail_to_pass_for_instances(
                 instance, client, timeout
             )
             updated_instances.append(updated_instance)
-            
+
             # Update statistics
             if had_fail_to_pass_before:
                 skipped_count += 1
-                logger.info(f"  ⏭️  Skipped (already had FAIL_TO_PASS)")
-            elif (fail_to_pass_raw := updated_instance.get("FAIL_TO_PASS")):
+                logger.info("  ⏭️  Skipped (already had FAIL_TO_PASS)")
+            elif fail_to_pass_raw := updated_instance.get("FAIL_TO_PASS"):
                 fail_to_pass = (
-                    json.loads(fail_to_pass_raw) if isinstance(fail_to_pass_raw, str) and fail_to_pass_raw
-                    else fail_to_pass_raw if isinstance(fail_to_pass_raw, list)
+                    json.loads(fail_to_pass_raw)
+                    if isinstance(fail_to_pass_raw, str) and fail_to_pass_raw
+                    else fail_to_pass_raw
+                    if isinstance(fail_to_pass_raw, list)
                     else []
                 )
-                
+
                 if fail_to_pass:
                     success_count += 1
-                    logger.info(f"  ✅ Success ({len(fail_to_pass)} FAIL_TO_PASS tests)")
                 else:
                     pass_to_pass = updated_instance.get("PASS_TO_PASS")
                     if isinstance(pass_to_pass, str):
                         pass_to_pass = json.loads(pass_to_pass) if pass_to_pass else []
-                    
+
                     if pass_to_pass:
                         success_count += 1
-                        logger.info(f"  ✅ Success (0 FAIL_TO_PASS, {len(pass_to_pass)} PASS_TO_PASS)")
                     else:
                         failed_count += 1
-                        logger.warning(f"  ❌ Failed (no tests found)")
+                        logger.warning("  ❌ Failed (no tests found)")
             else:
                 failed_count += 1
-                logger.warning(f"  ❌ Failed (computation error)")
-            
+                logger.warning("  ❌ Failed (computation error)")
+
             # Progress update every N instances
             if i % PROGRESS_UPDATE_INTERVAL == 0:
                 logger.info(
                     f"Progress: {i}/{len(instances)} | "
                     f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
                 )
-        
+
         # Final summary
         logger.info("=" * 60)
         logger.info("FAIL_TO_PASS Computation Summary:")
@@ -824,17 +839,17 @@ def compute_fail_to_pass_for_instances(
         if len(instances) > 0:
             logger.info(f"  Success rate: {success_count / len(instances) * 100:.1f}%")
         logger.info("=" * 60)
-        
+
         return updated_instances
 
     # Parallel processing with ThreadPoolExecutor
     def process_instance_worker(instance_with_index):
         """Worker function that processes a single instance with its own Docker client."""
         nonlocal success_count, failed_count, skipped_count
-        
+
         i, instance = instance_with_index
         instance_id = instance.get("instance_id", f"instance_{i}")
-        
+
         # Each worker gets its own Docker client to avoid conflicts
         client = docker.from_env()
         try:
@@ -842,7 +857,7 @@ def compute_fail_to_pass_for_instances(
             updated_instance = compute_fail_to_pass_for_instance(
                 instance, client, timeout
             )
-            
+
             # Update statistics (thread-safe)
             with stats_lock:
                 if had_fail_to_pass_before:
@@ -851,17 +866,21 @@ def compute_fail_to_pass_for_instances(
                     fail_to_pass = updated_instance.get("FAIL_TO_PASS")
                     if isinstance(fail_to_pass, str):
                         fail_to_pass = json.loads(fail_to_pass) if fail_to_pass else []
-                    
-                    if fail_to_pass or updated_instance.get("PASS_TO_PASS"):
+
+                    pass_to_pass = updated_instance.get("PASS_TO_PASS")
+
+                    if fail_to_pass or pass_to_pass:
                         success_count += 1
                     else:
                         failed_count += 1
+                        logger.error(f"  ❌ Failed (no tests found for {instance_id})")
                 else:
                     failed_count += 1
-            
+                    logger.error(f"  ❌ Failed (computation error for {instance_id})")
+
             return i, updated_instance
         except Exception as e:
-            logger.error(
+            logger.exception(
                 f"Failed to process instance {i + 1}/{len(instances)} ({instance_id}): {e}"
             )
             # Return original instance if processing fails
@@ -887,7 +906,7 @@ def compute_fail_to_pass_for_instances(
                 i, updated_instance = future.result()
                 updated_instances[i] = updated_instance
                 completed_count += 1
-                
+
                 # Progress update every N completions
                 if completed_count % PROGRESS_UPDATE_INTERVAL == 0:
                     with stats_lock:
@@ -896,7 +915,7 @@ def compute_fail_to_pass_for_instances(
                             f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
                         )
             except Exception as e:
-                logger.error(f"Worker thread failed with error: {e}")
+                logger.exception(f"Worker thread failed with error: {e}")
                 # The worker already handles exceptions and returns original instance
 
     # Final summary
@@ -918,7 +937,7 @@ def convert_single_instances_to_chains(
     output_file: str,
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
-    max_workers: int = 20,
+    max_workers: int = 10,
     **kwargs,
 ) -> None:
     """
