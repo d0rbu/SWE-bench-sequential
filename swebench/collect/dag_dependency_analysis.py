@@ -789,15 +789,20 @@ def sample_chains_from_dag(
                 node = dag.nodes[current_pr]
                 
                 # Validate and apply current node if validation is enabled
-                if validate_chains:
+                # Skip validation for the first node if we already validated it above
+                if validate_chains and len(chain_nodes) > 0:
                     assert validation_context, "Validation context must exist when validate_chains=True"
-                    # All nodes should validate (including first node for consistency)
+                    # Validate subsequent nodes (first node was already validated above)
                     success = validate_and_apply_candidate(
                         validation_context,
                         node,
                         validation_timeout,
                     )
-                    assert success, f"Pre-validated node {current_pr} failed validation"
+                    if not success:
+                        logger.warning(
+                            f"Node {current_pr} failed validation, ending chain at length {len(chain_nodes)}"
+                        )
+                        break
                 
                 # Add node to chain
                 chain_nodes.append(node)
