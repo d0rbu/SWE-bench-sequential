@@ -20,6 +20,8 @@ def main(
     max_chain_length: int = 5,
     file_overlap_threshold: float = 0.0,
     time_window_months: int = 6,
+    cache_dir: str = None,
+    use_cache: bool = True,
     log_level: str = "INFO",
 ):
     """
@@ -27,6 +29,9 @@ def main(
     
     This script converts a JSONL file containing single task instances into chains
     of related task instances based on file overlap and issue dependencies.
+    
+    The DAG computation can be cached to disk for faster subsequent runs. By default,
+    caches are stored in `.swebench_cache/` directory.
     
     Args:
         input_file: Path to input JSONL file containing single task instances
@@ -36,6 +41,8 @@ def main(
         max_chain_length: Maximum length of chains to create (default: 5)
         file_overlap_threshold: Minimum file overlap weight to consider dependency (default: 0.0 = any overlap)
         time_window_months: Time window in months for considering dependencies (default: 6)
+        cache_dir: Directory to store cache files (default: .swebench_cache)
+        use_cache: Whether to use cached DAG if available (default: True)
         log_level: Logging level (default: INFO)
     """
     # Configure logging
@@ -72,6 +79,8 @@ def main(
     print(f"    - Chain length: {min_chain_length}-{max_chain_length}")
     print(f"    - File overlap threshold: {file_overlap_threshold}")
     print(f"    - Time window: {time_window_months} months")
+    print(f"    - Cache directory: {cache_dir or '.swebench_cache'}")
+    print(f"    - Use cache: {use_cache}")
     
     # Convert single instances to chains
     convert_single_instances_to_chains(
@@ -82,6 +91,8 @@ def main(
         max_chain_length=max_chain_length,
         file_overlap_threshold=file_overlap_threshold,
         time_window_months=time_window_months,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
     )
     
     # Count chains in output
@@ -137,6 +148,24 @@ if __name__ == "__main__":
         type=int,
         default=6,
         help="Time window in months for considering dependencies (default: 6)",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="Directory to store cache files (default: .swebench_cache)",
+    )
+    parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        default=True,
+        help="Use cached DAG if available (default: True)",
+    )
+    parser.add_argument(
+        "--no_cache",
+        action="store_false",
+        dest="use_cache",
+        help="Don't use cached DAG, recompute from scratch",
     )
     parser.add_argument(
         "--log_level",

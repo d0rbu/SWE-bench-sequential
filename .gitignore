@@ -174,3 +174,4 @@ swebench/collect/prs
 swebench/collect/tasks
 swebench/collect/ft_tasks/*
 swebench/collect/eval_tasks/*
+.swebench_cache/

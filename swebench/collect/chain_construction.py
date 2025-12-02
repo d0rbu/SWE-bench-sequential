@@ -12,10 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import pickle
 import time
 from collections import Counter
 from datetime import datetime
 from itertools import pairwise
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Import DAG-based dependency analysis
@@ -413,6 +416,90 @@ def validate_chain_id(chain_id: str) -> bool:
     return True
 
 
+def _compute_dag_cache_key(
+    task_instances: List[Dict[str, Any]],
+    time_window_months: int,
+    file_overlap_threshold: float,
+) -> str:
+    """
+    Compute a cache key for the DAG based on input parameters.
+
+    Args:
+        task_instances: List of task instance dictionaries
+        time_window_months: Maximum age difference for dependencies
+        file_overlap_threshold: Minimum file overlap weight for dependency
+
+    Returns:
+        Cache key string
+    """
+    # Create hash from instance IDs and parameters
+    instance_ids = sorted([inst["instance_id"] for inst in task_instances])
+    hash_input = (
+        "|".join(instance_ids)
+        + f"|time_window={time_window_months}"
+        + f"|file_overlap={file_overlap_threshold}"
+    )
+    hash_obj = hashlib.md5(hash_input.encode())
+    return hash_obj.hexdigest()[:16]
+
+
+def _get_dag_cache_path(cache_dir: Optional[str], cache_key: str) -> Path:
+    """
+    Get the path to the cached DAG file.
+
+    Args:
+        cache_dir: Directory to store cache files (None for default)
+        cache_key: Cache key for this DAG computation
+
+    Returns:
+        Path to cache file
+    """
+    if cache_dir is None:
+        cache_dir = ".swebench_cache"
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return cache_path / f"dag_cache_{cache_key}.pkl"
+
+
+def _save_dag_to_cache(dag, cache_path: Path) -> None:
+    """
+    Save DAG to cache file.
+
+    Args:
+        dag: DependencyDAG to cache
+        cache_path: Path to cache file
+    """
+    try:
+        with open(cache_path, "wb") as f:
+            pickle.dump(dag, f)
+        logger.info(f"Saved DAG to cache: {cache_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save DAG to cache: {e}")
+
+
+def _load_dag_from_cache(cache_path: Path):
+    """
+    Load DAG from cache file.
+
+    Args:
+        cache_path: Path to cache file
+
+    Returns:
+        DependencyDAG if cache exists and is valid, None otherwise
+    """
+    if not cache_path.exists():
+        return None
+
+    try:
+        with open(cache_path, "rb") as f:
+            dag = pickle.load(f)
+        logger.info(f"Loaded DAG from cache: {cache_path}")
+        return dag
+    except Exception as e:
+        logger.warning(f"Failed to load DAG from cache: {e}")
+        return None
+
+
 def build_chains_from_repository_data(
     task_instances: List[Dict[str, Any]],
     time_window_months: int = 6,
@@ -422,6 +509,8 @@ def build_chains_from_repository_data(
     max_chain_length: int = 5,
     sampler: PRSampler = file_coverage_sampler,
     seed: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    use_cache: bool = True,
 ) -> List[Chain]:
     """
     Build chains from task instances using DAG-based dependency analysis.
@@ -430,6 +519,8 @@ def build_chains_from_repository_data(
     - File overlap detection (with precise pre/post state tracking)
     - Temporal proximity filtering
     - Issue relationship matching
+
+    The DAG computation can be cached to disk for faster subsequent runs.
 
     Args:
         task_instances: List of task instance dictionaries
@@ -441,6 +532,8 @@ def build_chains_from_repository_data(
         sampler: Function to select starting PR for chains. Takes (leaf_prs, dag, covered_files, seed)
                  and returns selected PR number. Defaults to file_coverage_sampler.
         seed: Random seed for deterministic sampling
+        cache_dir: Directory to store cache files (default: .swebench_cache)
+        use_cache: Whether to use cached DAG if available (default: True)
 
     Returns:
         List of Chain objects sampled from the dependency DAG
@@ -450,12 +543,28 @@ def build_chains_from_repository_data(
 
     logger.info(f"Building dependency DAG from {len(task_instances)} task instances")
 
-    # Build the dependency DAG
-    dag = build_dependency_dag(
-        task_instances,
-        time_window_months=time_window_months,
-        file_overlap_threshold=file_overlap_threshold,
-    )
+    # Compute cache key and check cache
+    dag = None
+    if use_cache:
+        cache_key = _compute_dag_cache_key(
+            task_instances, time_window_months, file_overlap_threshold
+        )
+        cache_path = _get_dag_cache_path(cache_dir, cache_key)
+        dag = _load_dag_from_cache(cache_path)
+
+    # Build the dependency DAG if not cached
+    if dag is None:
+        dag = build_dependency_dag(
+            task_instances,
+            time_window_months=time_window_months,
+            file_overlap_threshold=file_overlap_threshold,
+        )
+
+        # Save to cache for next time
+        if use_cache:
+            _save_dag_to_cache(dag, cache_path)
+    else:
+        logger.info("Using cached DAG computation")
 
     logger.info(
         f"DAG built with {len(dag.nodes)} nodes and "
@@ -550,8 +659,38 @@ def load_task_instances(input_file: str) -> List[Dict[str, Any]]:
     return task_instances
 
 
+def clear_dag_cache(cache_dir: Optional[str] = None) -> None:
+    """
+    Clear all cached DAG files.
+
+    Args:
+        cache_dir: Directory containing cache files (default: .swebench_cache)
+    """
+    if cache_dir is None:
+        cache_dir = ".swebench_cache"
+    
+    cache_path = Path(cache_dir)
+    if not cache_path.exists():
+        logger.info(f"Cache directory does not exist: {cache_path}")
+        return
+    
+    # Remove all DAG cache files
+    cache_files = list(cache_path.glob("dag_cache_*.pkl"))
+    for cache_file in cache_files:
+        try:
+            cache_file.unlink()
+            logger.info(f"Removed cache file: {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to remove cache file {cache_file}: {e}")
+    
+    if cache_files:
+        logger.info(f"Cleared {len(cache_files)} cache file(s) from {cache_path}")
+    else:
+        logger.info(f"No cache files found in {cache_path}")
+
+
 def convert_single_instances_to_chains(
-    input_file: str, output_file: str, **kwargs
+    input_file: str, output_file: str, cache_dir: Optional[str] = None, use_cache: bool = True, **kwargs
 ) -> None:
     """
     Convert a file of single task instances to chains using DAG-based analysis.
@@ -559,10 +698,16 @@ def convert_single_instances_to_chains(
     Supports both JSON and JSONL input formats. All task instance fields are
     preserved in the output chains, including version information if present.
 
+    The DAG computation can be cached to disk for faster subsequent runs with the same
+    input file and parameters. By default, caches are stored in `.swebench_cache/`.
+
     Args:
         input_file: Path to input file (JSON or JSONL) with single instances
         output_file: Path to output JSONL file with chains
+        cache_dir: Directory to store cache files (default: .swebench_cache)
+        use_cache: Whether to use cached DAG if available (default: True)
         **kwargs: Additional arguments to pass to build_chains_from_repository_data
+                  (time_window_months, file_overlap_threshold, num_chains, etc.)
 
     Note:
         If task instances contain a 'version' field (e.g., from get_versions.py),
@@ -575,7 +720,9 @@ def convert_single_instances_to_chains(
 
     # Build chains using DAG-based analysis
     # All task instance fields (including 'version') are preserved
-    chains = build_chains_from_repository_data(task_instances, **kwargs)
+    chains = build_chains_from_repository_data(
+        task_instances, cache_dir=cache_dir, use_cache=use_cache, **kwargs
+    )
 
     # Save chains
     save_chains_to_jsonl(chains, output_file)
