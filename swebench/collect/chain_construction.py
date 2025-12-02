@@ -752,6 +752,9 @@ def compute_fail_to_pass_for_instances(
     logging.getLogger("docker.utils.config").setLevel(logging.WARNING)
     logging.getLogger("docker.auth").setLevel(logging.WARNING)
     
+    # Progress update interval
+    PROGRESS_UPDATE_INTERVAL = 10
+    
     logger.info(f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers")
     
     # Track statistics
@@ -759,20 +762,15 @@ def compute_fail_to_pass_for_instances(
     failed_count = 0
     skipped_count = 0
     stats_lock = threading.Lock()
-    
-    logger.info(
-        f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers"
-    )
 
     if max_workers == 1:
         # Sequential processing for compatibility
         client = docker.from_env()
         updated_instances = []
 
-        for i, instance in enumerate(instances):
-            logger.info(
-                f"Processing instance {i + 1}/{len(instances)}: {instance.get('instance_id')}"
-            )
+        for i, instance in enumerate(instances, 1):
+            instance_id = instance.get('instance_id')
+            logger.info(f"[{i}/{len(instances)}] Processing {instance_id}")
 
             had_fail_to_pass_before = bool(instance.get("FAIL_TO_PASS"))
             updated_instance = compute_fail_to_pass_for_instance(
@@ -784,10 +782,12 @@ def compute_fail_to_pass_for_instances(
             if had_fail_to_pass_before:
                 skipped_count += 1
                 logger.info(f"  ⏭️  Skipped (already had FAIL_TO_PASS)")
-            elif updated_instance.get("FAIL_TO_PASS"):
-                fail_to_pass = updated_instance.get("FAIL_TO_PASS")
-                if isinstance(fail_to_pass, str):
-                    fail_to_pass = json.loads(fail_to_pass) if fail_to_pass else []
+            elif (fail_to_pass_raw := updated_instance.get("FAIL_TO_PASS")):
+                fail_to_pass = (
+                    json.loads(fail_to_pass_raw) if isinstance(fail_to_pass_raw, str) and fail_to_pass_raw
+                    else fail_to_pass_raw if isinstance(fail_to_pass_raw, list)
+                    else []
+                )
                 
                 if fail_to_pass:
                     success_count += 1
@@ -807,8 +807,8 @@ def compute_fail_to_pass_for_instances(
                 failed_count += 1
                 logger.warning(f"  ❌ Failed (computation error)")
             
-            # Progress update every 10 instances
-            if i % 10 == 0:
+            # Progress update every N instances
+            if i % PROGRESS_UPDATE_INTERVAL == 0:
                 logger.info(
                     f"Progress: {i}/{len(instances)} | "
                     f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
@@ -888,8 +888,8 @@ def compute_fail_to_pass_for_instances(
                 updated_instances[i] = updated_instance
                 completed_count += 1
                 
-                # Progress update every 10 completions
-                if completed_count % 10 == 0:
+                # Progress update every N completions
+                if completed_count % PROGRESS_UPDATE_INTERVAL == 0:
                     with stats_lock:
                         logger.info(
                             f"Progress: {completed_count}/{len(instances)} | "
