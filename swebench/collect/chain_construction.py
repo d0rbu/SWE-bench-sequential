@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -743,39 +744,121 @@ def compute_fail_to_pass_for_instances(
     Returns:
         Updated instances with FAIL_TO_PASS computed
     """
-    logger.info(
-        f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers"
-    )
+
+    # Suppress verbose logging from third-party libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    logging.getLogger("docker").setLevel(logging.WARNING)
+    logging.getLogger("docker.utils.config").setLevel(logging.WARNING)
+    logging.getLogger("docker.auth").setLevel(logging.WARNING)
+    
+    # Progress update interval
+    PROGRESS_UPDATE_INTERVAL = 10
+    
+    logger.info(f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers")
+    
+    # Track statistics
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+    stats_lock = threading.Lock()
 
     if max_workers == 1:
         # Sequential processing for compatibility
         client = docker.from_env()
         updated_instances = []
-        for i, instance in enumerate(instances):
-            logger.info(
-                f"Processing instance {i + 1}/{len(instances)}: {instance.get('instance_id')}"
-            )
+
+        for i, instance in enumerate(instances, 1):
+            instance_id = instance.get('instance_id')
+            logger.info(f"[{i}/{len(instances)}] Processing {instance_id}")
+
+            had_fail_to_pass_before = bool(instance.get("FAIL_TO_PASS"))
             updated_instance = compute_fail_to_pass_for_instance(
                 instance, client, timeout
             )
             updated_instances.append(updated_instance)
-        logger.info("Completed FAIL_TO_PASS computation for all instances")
+            
+            # Update statistics
+            if had_fail_to_pass_before:
+                skipped_count += 1
+                logger.info(f"  ⏭️  Skipped (already had FAIL_TO_PASS)")
+            elif (fail_to_pass_raw := updated_instance.get("FAIL_TO_PASS")):
+                fail_to_pass = (
+                    json.loads(fail_to_pass_raw) if isinstance(fail_to_pass_raw, str) and fail_to_pass_raw
+                    else fail_to_pass_raw if isinstance(fail_to_pass_raw, list)
+                    else []
+                )
+                
+                if fail_to_pass:
+                    success_count += 1
+                    logger.info(f"  ✅ Success ({len(fail_to_pass)} FAIL_TO_PASS tests)")
+                else:
+                    pass_to_pass = updated_instance.get("PASS_TO_PASS")
+                    if isinstance(pass_to_pass, str):
+                        pass_to_pass = json.loads(pass_to_pass) if pass_to_pass else []
+                    
+                    if pass_to_pass:
+                        success_count += 1
+                        logger.info(f"  ✅ Success (0 FAIL_TO_PASS, {len(pass_to_pass)} PASS_TO_PASS)")
+                    else:
+                        failed_count += 1
+                        logger.warning(f"  ❌ Failed (no tests found)")
+            else:
+                failed_count += 1
+                logger.warning(f"  ❌ Failed (computation error)")
+            
+            # Progress update every N instances
+            if i % PROGRESS_UPDATE_INTERVAL == 0:
+                logger.info(
+                    f"Progress: {i}/{len(instances)} | "
+                    f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
+                )
+        
+        # Final summary
+        logger.info("=" * 60)
+        logger.info("FAIL_TO_PASS Computation Summary:")
+        logger.info(f"  Total:      {len(instances)}")
+        logger.info(f"  ✅ Success:  {success_count}")
+        logger.info(f"  ❌ Failed:   {failed_count}")
+        logger.info(f"  ⏭️  Skipped:  {skipped_count}")
+        if len(instances) > 0:
+            logger.info(f"  Success rate: {success_count / len(instances) * 100:.1f}%")
+        logger.info("=" * 60)
+        
         return updated_instances
 
     # Parallel processing with ThreadPoolExecutor
     def process_instance_worker(instance_with_index):
         """Worker function that processes a single instance with its own Docker client."""
+        nonlocal success_count, failed_count, skipped_count
+        
         i, instance = instance_with_index
         instance_id = instance.get("instance_id", f"instance_{i}")
-        logger.info(f"Processing instance {i + 1}/{len(instances)}: {instance_id}")
-
+        
         # Each worker gets its own Docker client to avoid conflicts
         client = docker.from_env()
         try:
+            had_fail_to_pass_before = bool(instance.get("FAIL_TO_PASS"))
             updated_instance = compute_fail_to_pass_for_instance(
                 instance, client, timeout
             )
-            logger.info(f"Completed instance {i + 1}/{len(instances)}: {instance_id}")
+            
+            # Update statistics (thread-safe)
+            with stats_lock:
+                if had_fail_to_pass_before:
+                    skipped_count += 1
+                elif updated_instance.get("FAIL_TO_PASS"):
+                    fail_to_pass = updated_instance.get("FAIL_TO_PASS")
+                    if isinstance(fail_to_pass, str):
+                        fail_to_pass = json.loads(fail_to_pass) if fail_to_pass else []
+                    
+                    if fail_to_pass or updated_instance.get("PASS_TO_PASS"):
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                else:
+                    failed_count += 1
+            
             return i, updated_instance
         except Exception as e:
             logger.error(
@@ -804,12 +887,29 @@ def compute_fail_to_pass_for_instances(
                 i, updated_instance = future.result()
                 updated_instances[i] = updated_instance
                 completed_count += 1
-                logger.info(f"Collected result {completed_count}/{len(instances)}")
+                
+                # Progress update every N completions
+                if completed_count % PROGRESS_UPDATE_INTERVAL == 0:
+                    with stats_lock:
+                        logger.info(
+                            f"Progress: {completed_count}/{len(instances)} | "
+                            f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
+                        )
             except Exception as e:
                 logger.error(f"Worker thread failed with error: {e}")
                 # The worker already handles exceptions and returns original instance
 
-    logger.info("Completed FAIL_TO_PASS computation for all instances")
+    # Final summary
+    logger.info("=" * 60)
+    logger.info("FAIL_TO_PASS Computation Summary:")
+    logger.info(f"  Total:      {len(instances)}")
+    logger.info(f"  ✅ Success:  {success_count}")
+    logger.info(f"  ❌ Failed:   {failed_count}")
+    logger.info(f"  ⏭️  Skipped:  {skipped_count}")
+    if len(instances) > 0:
+        logger.info(f"  Success rate: {success_count / len(instances) * 100:.1f}%")
+    logger.info("=" * 60)
+
     return updated_instances
 
 
