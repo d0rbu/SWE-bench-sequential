@@ -20,6 +20,8 @@ def main(
     max_chain_length: int = 5,
     file_overlap_threshold: float = 0.0,
     time_window_months: int = 6,
+    compute_fail_to_pass: bool = True,
+    fail_to_pass_timeout: int = 1800,
     log_level: str = "INFO",
 ):
     """
@@ -36,6 +38,8 @@ def main(
         max_chain_length: Maximum length of chains to create (default: 5)
         file_overlap_threshold: Minimum file overlap weight to consider dependency (default: 0.0 = any overlap)
         time_window_months: Time window in months for considering dependencies (default: 6)
+        compute_fail_to_pass: If True, compute FAIL_TO_PASS by running tests (default: True)
+        fail_to_pass_timeout: Timeout for FAIL_TO_PASS computation per instance in seconds (default: 1800)
         log_level: Logging level (default: INFO)
     """
     # Configure logging
@@ -82,6 +86,8 @@ def main(
         max_chain_length=max_chain_length,
         file_overlap_threshold=file_overlap_threshold,
         time_window_months=time_window_months,
+        compute_fail_to_pass=compute_fail_to_pass,
+        fail_to_pass_timeout=fail_to_pass_timeout,
     )
     
     # Count chains in output
@@ -137,6 +143,18 @@ if __name__ == "__main__":
         type=int,
         default=6,
         help="Time window in months for considering dependencies (default: 6)",
+    )
+    parser.add_argument(
+        "--compute_fail_to_pass",
+        type=lambda x: str(x).lower() in ["true", "1", "yes"],
+        default=True,
+        help="Whether to compute FAIL_TO_PASS by running tests (default: True)",
+    )
+    parser.add_argument(
+        "--fail_to_pass_timeout",
+        type=int,
+        default=1800,
+        help="Timeout for FAIL_TO_PASS computation per instance in seconds (default: 1800)",
     )
     parser.add_argument(
         "--log_level",
