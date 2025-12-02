@@ -33,14 +33,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import additional dependencies for FAIL_TO_PASS computation
-import docker
 import tempfile
 from pathlib import Path
+
+import docker
+
+from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, UTF8
 from swebench.harness.docker_build import build_container, setup_logger
-from swebench.harness.docker_utils import cleanup_container, copy_to_container, exec_run_with_timeout
+from swebench.harness.docker_utils import (
+    cleanup_container,
+    copy_to_container,
+    exec_run_with_timeout,
+)
 from swebench.harness.grading import get_logs_eval
 from swebench.harness.test_spec.test_spec import make_test_spec
-from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, UTF8
 
 
 class Chain:
@@ -568,18 +574,18 @@ def compute_fail_to_pass_for_instance(
 ) -> Dict[str, Any]:
     """
     Compute FAIL_TO_PASS test list for a task instance by running tests without the fix.
-    
+
     This function:
     1. Creates a test environment at the base commit
     2. Applies only the test_patch (not the main patch)
     3. Runs tests and identifies which ones fail
     4. Those failing tests become FAIL_TO_PASS
-    
+
     Args:
         instance: Task instance dictionary containing test_patch, patch, etc.
         client: Docker client (creates new one if not provided)
         timeout: Timeout for test execution in seconds
-        
+
     Returns:
         Updated instance with FAIL_TO_PASS and PASS_TO_PASS fields added
     """
@@ -587,33 +593,34 @@ def compute_fail_to_pass_for_instance(
     if "FAIL_TO_PASS" in instance and instance["FAIL_TO_PASS"]:
         logger.debug(f"Instance {instance.get('instance_id')} already has FAIL_TO_PASS")
         return instance
-    
+
     # Skip if no test_patch
     test_patch = instance.get("test_patch", "")
     if not test_patch or not test_patch.strip():
-        logger.warning(f"Instance {instance.get('instance_id')} has no test_patch, cannot compute FAIL_TO_PASS")
+        logger.warning(
+            f"Instance {instance.get('instance_id')} has no test_patch, cannot compute FAIL_TO_PASS"
+        )
         instance["FAIL_TO_PASS"] = []
         instance["PASS_TO_PASS"] = []
         return instance
-    
+
     logger.info(f"Computing FAIL_TO_PASS for instance {instance.get('instance_id')}")
-    
+
     # Create Docker client if not provided
     if client is None:
         client = docker.from_env()
-    
+
     # Create test spec (will determine test environment)
     test_spec = make_test_spec(instance)
-    
+
     # Create temporary log directory
     with tempfile.TemporaryDirectory() as temp_dir:
         log_dir = Path(temp_dir)
         log_file = log_dir / "compute_fail_to_pass.log"
         compute_logger = setup_logger(
-            f"compute_f2p_{instance.get('instance_id')}",
-            log_file
+            f"compute_f2p_{instance.get('instance_id')}", log_file
         )
-        
+
         container = None
         try:
             # Build and start container
@@ -628,20 +635,20 @@ def compute_fail_to_pass_for_instance(
             )
             container.start()
             compute_logger.info(f"Container started: {container.id}")
-            
+
             # Apply test_patch to the container
             compute_logger.info("Applying test_patch to container")
             test_patch_file = log_dir / "test.patch"
             test_patch_file.write_text(test_patch)
             copy_to_container(container, test_patch_file, Path(DOCKER_PATCH))
-            
+
             # Try to apply test patch
             result = container.exec_run(
                 f"git apply --verbose {DOCKER_PATCH}",
                 workdir=DOCKER_WORKDIR,
                 user=DOCKER_USER,
             )
-            
+
             if result.exit_code != 0:
                 compute_logger.warning(
                     f"Failed to apply test_patch: {result.output.decode(UTF8)}"
@@ -650,67 +657,67 @@ def compute_fail_to_pass_for_instance(
                 instance["FAIL_TO_PASS"] = []
                 instance["PASS_TO_PASS"] = []
                 return instance
-            
+
             compute_logger.info("Test patch applied successfully")
-            
+
             # Run tests
             compute_logger.info("Running tests to identify FAIL_TO_PASS")
             eval_file = log_dir / "eval.sh"
             eval_file.write_text(test_spec.eval_script)
             copy_to_container(container, eval_file, Path("/eval.sh"))
-            
+
             test_output, timed_out, total_runtime = exec_run_with_timeout(
                 container, "/bin/bash /eval.sh", timeout
             )
-            
+
             if timed_out:
                 compute_logger.warning(f"Tests timed out after {timeout} seconds")
                 instance["FAIL_TO_PASS"] = []
                 instance["PASS_TO_PASS"] = []
                 return instance
-            
+
             # Write test output and parse results
             test_output_file = log_dir / "test_output.txt"
             test_output_file.write_text(test_output)
             compute_logger.info(f"Tests completed in {total_runtime:.2f}s")
-            
+
             # Parse test results
             status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
-            
+
             if not tests_ran:
                 compute_logger.warning("Tests did not run successfully")
                 instance["FAIL_TO_PASS"] = []
                 instance["PASS_TO_PASS"] = []
                 return instance
-            
+
             # Tests that FAIL are FAIL_TO_PASS (they should pass after fix)
             # Tests that PASS are PASS_TO_PASS (they should still pass after fix)
             fail_to_pass = []
             pass_to_pass = []
-            
+
             for test_case, status in status_map.items():
                 if status in ["PASSED", "XFAIL"]:
                     pass_to_pass.append(test_case)
                 else:
                     fail_to_pass.append(test_case)
-            
+
             compute_logger.info(
                 f"Found {len(fail_to_pass)} FAIL_TO_PASS tests and "
                 f"{len(pass_to_pass)} PASS_TO_PASS tests"
             )
-            
+
             # Store in instance (as JSON strings to match dataset format)
             instance["FAIL_TO_PASS"] = json.dumps(fail_to_pass)
             instance["PASS_TO_PASS"] = json.dumps(pass_to_pass)
-            
+
             return instance
-            
+
         except Exception as e:
             compute_logger.error(f"Error computing FAIL_TO_PASS: {e}", exc_info=True)
             instance["FAIL_TO_PASS"] = []
             instance["PASS_TO_PASS"] = []
             return instance
-            
+
         finally:
             # Always cleanup container
             if container:
@@ -722,64 +729,74 @@ def compute_fail_to_pass_for_instance(
 
 def compute_fail_to_pass_for_instances(
     instances: List[Dict[str, Any]],
-    max_workers: int = 5,
+    max_workers: int = 20,
     timeout: int = 1800,
 ) -> List[Dict[str, Any]]:
     """
     Compute FAIL_TO_PASS for multiple instances.
-    
+
     Args:
         instances: List of task instances
-        max_workers: Number of parallel workers (default: 5)
+        max_workers: Number of parallel workers
         timeout: Timeout per instance in seconds
-        
+
     Returns:
         Updated instances with FAIL_TO_PASS computed
     """
-    logger.info(f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers")
-    
+    logger.info(
+        f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers"
+    )
+
     if max_workers == 1:
         # Sequential processing for compatibility
         client = docker.from_env()
         updated_instances = []
         for i, instance in enumerate(instances):
-            logger.info(f"Processing instance {i+1}/{len(instances)}: {instance.get('instance_id')}")
-            updated_instance = compute_fail_to_pass_for_instance(instance, client, timeout)
+            logger.info(
+                f"Processing instance {i + 1}/{len(instances)}: {instance.get('instance_id')}"
+            )
+            updated_instance = compute_fail_to_pass_for_instance(
+                instance, client, timeout
+            )
             updated_instances.append(updated_instance)
         logger.info("Completed FAIL_TO_PASS computation for all instances")
         return updated_instances
-    
+
     # Parallel processing with ThreadPoolExecutor
     def process_instance_worker(instance_with_index):
         """Worker function that processes a single instance with its own Docker client."""
         i, instance = instance_with_index
-        instance_id = instance.get('instance_id', f'instance_{i}')
-        logger.info(f"Processing instance {i+1}/{len(instances)}: {instance_id}")
-        
+        instance_id = instance.get("instance_id", f"instance_{i}")
+        logger.info(f"Processing instance {i + 1}/{len(instances)}: {instance_id}")
+
         # Each worker gets its own Docker client to avoid conflicts
         client = docker.from_env()
         try:
-            updated_instance = compute_fail_to_pass_for_instance(instance, client, timeout)
-            logger.info(f"Completed instance {i+1}/{len(instances)}: {instance_id}")
+            updated_instance = compute_fail_to_pass_for_instance(
+                instance, client, timeout
+            )
+            logger.info(f"Completed instance {i + 1}/{len(instances)}: {instance_id}")
             return i, updated_instance
         except Exception as e:
-            logger.error(f"Failed to process instance {i+1}/{len(instances)} ({instance_id}): {e}")
+            logger.error(
+                f"Failed to process instance {i + 1}/{len(instances)} ({instance_id}): {e}"
+            )
             # Return original instance if processing fails
             return i, instance
-    
+
     # Optimize worker count based on actual number of instances
     actual_workers = min(max_workers, len(instances))
-    
+
     # Process instances in parallel
     updated_instances = [None] * len(instances)  # Pre-allocate list with correct order
-    
+
     with ThreadPoolExecutor(max_workers=actual_workers) as executor:
         # Submit all tasks
         futures = {
-            executor.submit(process_instance_worker, (i, instance)): i 
+            executor.submit(process_instance_worker, (i, instance)): i
             for i, instance in enumerate(instances)
         }
-        
+
         # Collect results as they complete
         completed_count = 0
         for future in as_completed(futures):
@@ -791,18 +808,18 @@ def compute_fail_to_pass_for_instances(
             except Exception as e:
                 logger.error(f"Worker thread failed with error: {e}")
                 # The worker already handles exceptions and returns original instance
-    
+
     logger.info("Completed FAIL_TO_PASS computation for all instances")
     return updated_instances
 
 
 def convert_single_instances_to_chains(
-    input_file: str, 
-    output_file: str, 
+    input_file: str,
+    output_file: str,
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
-    max_workers: int = 5,
-    **kwargs
+    max_workers: int = 20,
+    **kwargs,
 ) -> None:
     """
     Convert a file of single task instances to chains using DAG-based analysis.
@@ -823,21 +840,19 @@ def convert_single_instances_to_chains(
         this information is preserved in the chain output. The chain metadata
         does not explicitly track versions, but all original task instance
         fields are maintained.
-        
+
         If compute_fail_to_pass is True, the function will compute FAIL_TO_PASS
         and PASS_TO_PASS test lists by running tests without the fix patch.
         This is required for chain validation during sampling.
     """
     # Load single instances (supports both JSON and JSONL)
     task_instances = load_task_instances(input_file)
-    
+
     # Compute FAIL_TO_PASS if requested
     if compute_fail_to_pass:
         logger.info("Computing FAIL_TO_PASS for task instances")
         task_instances = compute_fail_to_pass_for_instances(
-            task_instances,
-            max_workers=max_workers,
-            timeout=fail_to_pass_timeout
+            task_instances, max_workers=max_workers, timeout=fail_to_pass_timeout
         )
 
     # Build chains using DAG-based analysis
