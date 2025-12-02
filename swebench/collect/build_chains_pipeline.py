@@ -22,6 +22,9 @@ def main(
     time_window_months: int = 6,
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
+    max_workers: int = 10,
+    cache_dir: str = None,
+    use_cache: bool = True,
     log_level: str = "INFO",
 ):
     """
@@ -40,6 +43,9 @@ def main(
         time_window_months: Time window in months for considering dependencies (default: 6)
         compute_fail_to_pass: If True, compute FAIL_TO_PASS by running tests (default: True)
         fail_to_pass_timeout: Timeout for FAIL_TO_PASS computation per instance in seconds (default: 1800)
+        max_workers: Number of parallel workers for FAIL_TO_PASS computation (default: 10)
+        cache_dir: Directory to store FAIL_TO_PASS cache (default: .swebench_cache)
+        use_cache: Whether to use cached FAIL_TO_PASS results (default: True)
         log_level: Logging level (default: INFO)
     """
     # Configure logging
@@ -76,6 +82,11 @@ def main(
     print(f"    - Chain length: {min_chain_length}-{max_chain_length}")
     print(f"    - File overlap threshold: {file_overlap_threshold}")
     print(f"    - Time window: {time_window_months} months")
+    print(f"    - Compute FAIL_TO_PASS: {compute_fail_to_pass}")
+    if compute_fail_to_pass:
+        print(f"    - Max workers: {max_workers}")
+        print(f"    - Cache directory: {cache_dir or '.swebench_cache'}")
+        print(f"    - Use cache: {use_cache}")
     
     # Convert single instances to chains
     convert_single_instances_to_chains(
@@ -88,6 +99,9 @@ def main(
         time_window_months=time_window_months,
         compute_fail_to_pass=compute_fail_to_pass,
         fail_to_pass_timeout=fail_to_pass_timeout,
+        max_workers=max_workers,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
     )
     
     # Count chains in output
@@ -155,6 +169,30 @@ if __name__ == "__main__":
         type=int,
         default=1800,
         help="Timeout for FAIL_TO_PASS computation per instance in seconds (default: 1800)",
+    )
+    parser.add_argument(
+        "--max_workers",
+        type=int,
+        default=10,
+        help="Number of parallel workers for FAIL_TO_PASS computation (default: 10)",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="Directory to store FAIL_TO_PASS cache (default: .swebench_cache)",
+    )
+    parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        default=True,
+        help="Use cached FAIL_TO_PASS results (default: True)",
+    )
+    parser.add_argument(
+        "--no_cache",
+        action="store_false",
+        dest="use_cache",
+        help="Don't use cached FAIL_TO_PASS results, recompute from scratch",
     )
     parser.add_argument(
         "--log_level",
