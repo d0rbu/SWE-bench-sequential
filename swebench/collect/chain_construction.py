@@ -32,6 +32,106 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def load_test_specs_from_dataset(
+    dataset_name: str = "princeton-nlp/SWE-bench_Lite",
+    split: str = "test"
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Load test specifications (FAIL_TO_PASS, PASS_TO_PASS) from official SWE-bench dataset.
+    
+    Args:
+        dataset_name: Name of the dataset on HuggingFace (default: princeton-nlp/SWE-bench_Lite)
+        split: Dataset split to load (default: test)
+    
+    Returns:
+        Dictionary mapping instance_id to test specification fields (FAIL_TO_PASS, PASS_TO_PASS)
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        logger.warning(
+            "datasets library not available. Cannot load test specifications from HuggingFace. "
+            "Install with: pip install datasets"
+        )
+        return {}
+    
+    logger.info(f"Loading test specifications from {dataset_name} ({split} split)...")
+    
+    try:
+        dataset = load_dataset(dataset_name, split=split)
+        test_specs = {}
+        
+        for instance in dataset:
+            instance_id = instance.get("instance_id")
+            if not instance_id:
+                continue
+            
+            test_specs[instance_id] = {
+                "FAIL_TO_PASS": instance.get("FAIL_TO_PASS", "[]"),
+                "PASS_TO_PASS": instance.get("PASS_TO_PASS", "[]"),
+            }
+        
+        logger.info(f"Loaded test specifications for {len(test_specs)} instances")
+        return test_specs
+        
+    except Exception as e:
+        logger.error(f"Failed to load test specifications from {dataset_name}: {e}")
+        return {}
+
+
+def merge_test_specs_into_instances(
+    task_instances: List[Dict[str, Any]],
+    test_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    dataset_name: Optional[str] = None,
+    split: str = "test"
+) -> List[Dict[str, Any]]:
+    """
+    Merge test specifications into task instances.
+    
+    Args:
+        task_instances: List of task instance dictionaries
+        test_specs: Pre-loaded test specifications. If None and dataset_name is provided,
+                   will load from HuggingFace dataset.
+        dataset_name: Optional dataset name to load test specs from if test_specs is None
+        split: Dataset split to use if loading from HuggingFace
+    
+    Returns:
+        Updated task instances with FAIL_TO_PASS and PASS_TO_PASS fields added
+    """
+    if test_specs is None and dataset_name:
+        test_specs = load_test_specs_from_dataset(dataset_name, split)
+    
+    if not test_specs:
+        logger.warning(
+            "No test specifications provided. Instances will not have FAIL_TO_PASS/PASS_TO_PASS fields."
+        )
+        return task_instances
+    
+    merged_count = 0
+    missing_count = 0
+    
+    for instance in task_instances:
+        instance_id = instance.get("instance_id")
+        if not instance_id:
+            continue
+        
+        if instance_id in test_specs:
+            # Only add if not already present
+            if "FAIL_TO_PASS" not in instance:
+                instance["FAIL_TO_PASS"] = test_specs[instance_id]["FAIL_TO_PASS"]
+            if "PASS_TO_PASS" not in instance:
+                instance["PASS_TO_PASS"] = test_specs[instance_id]["PASS_TO_PASS"]
+            merged_count += 1
+        else:
+            missing_count += 1
+    
+    logger.info(f"Merged test specs for {merged_count} instances")
+    if missing_count > 0:
+        logger.warning(f"{missing_count} instances have no test specifications in the dataset")
+    
+    return task_instances
+
+
 class Chain:
     """
     Represents a sequence of related task instances forming a multi-turn chain.
@@ -551,7 +651,12 @@ def load_task_instances(input_file: str) -> List[Dict[str, Any]]:
 
 
 def convert_single_instances_to_chains(
-    input_file: str, output_file: str, **kwargs
+    input_file: str, 
+    output_file: str, 
+    load_test_specs: bool = True,
+    test_dataset: str = "princeton-nlp/SWE-bench_Lite",
+    test_split: str = "test",
+    **kwargs
 ) -> None:
     """
     Convert a file of single task instances to chains using DAG-based analysis.
@@ -562,6 +667,9 @@ def convert_single_instances_to_chains(
     Args:
         input_file: Path to input file (JSON or JSONL) with single instances
         output_file: Path to output JSONL file with chains
+        load_test_specs: If True, load FAIL_TO_PASS and PASS_TO_PASS tests from HuggingFace (default: True)
+        test_dataset: Dataset name to load test specs from (default: princeton-nlp/SWE-bench_Lite)
+        test_split: Dataset split to use (default: test)
         **kwargs: Additional arguments to pass to build_chains_from_repository_data
 
     Note:
@@ -569,9 +677,21 @@ def convert_single_instances_to_chains(
         this information is preserved in the chain output. The chain metadata
         does not explicitly track versions, but all original task instance
         fields are maintained.
+        
+        If load_test_specs is True, the function will attempt to load FAIL_TO_PASS
+        and PASS_TO_PASS test specifications from the official SWE-bench dataset
+        and merge them into the task instances. This is required for chain validation.
     """
     # Load single instances (supports both JSON and JSONL)
     task_instances = load_task_instances(input_file)
+    
+    # Load and merge test specifications if requested
+    if load_test_specs:
+        task_instances = merge_test_specs_into_instances(
+            task_instances,
+            dataset_name=test_dataset,
+            split=test_split
+        )
 
     # Build chains using DAG-based analysis
     # All task instance fields (including 'version') are preserved

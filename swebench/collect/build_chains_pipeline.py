@@ -20,6 +20,9 @@ def main(
     max_chain_length: int = 5,
     file_overlap_threshold: float = 0.0,
     time_window_months: int = 6,
+    load_test_specs: bool = True,
+    test_dataset: str = "princeton-nlp/SWE-bench_Lite",
+    test_split: str = "test",
     log_level: str = "INFO",
 ):
     """
@@ -36,6 +39,9 @@ def main(
         max_chain_length: Maximum length of chains to create (default: 5)
         file_overlap_threshold: Minimum file overlap weight to consider dependency (default: 0.0 = any overlap)
         time_window_months: Time window in months for considering dependencies (default: 6)
+        load_test_specs: If True, load test specs from HuggingFace (default: True)
+        test_dataset: Dataset name to load test specs from (default: princeton-nlp/SWE-bench_Lite)
+        test_split: Dataset split to use (default: test)
         log_level: Logging level (default: INFO)
     """
     # Configure logging
@@ -82,6 +88,9 @@ def main(
         max_chain_length=max_chain_length,
         file_overlap_threshold=file_overlap_threshold,
         time_window_months=time_window_months,
+        load_test_specs=load_test_specs,
+        test_dataset=test_dataset,
+        test_split=test_split,
     )
     
     # Count chains in output
@@ -137,6 +146,24 @@ if __name__ == "__main__":
         type=int,
         default=6,
         help="Time window in months for considering dependencies (default: 6)",
+    )
+    parser.add_argument(
+        "--load_test_specs",
+        type=lambda x: str(x).lower() in ["true", "1", "yes"],
+        default=True,
+        help="Whether to load test specifications from HuggingFace (default: True)",
+    )
+    parser.add_argument(
+        "--test_dataset",
+        type=str,
+        default="princeton-nlp/SWE-bench_Lite",
+        help="Dataset name to load test specs from (default: princeton-nlp/SWE-bench_Lite)",
+    )
+    parser.add_argument(
+        "--test_split",
+        type=str,
+        default="test",
+        help="Dataset split to use for loading test specs (default: test)",
     )
     parser.add_argument(
         "--log_level",
