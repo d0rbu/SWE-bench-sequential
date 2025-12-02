@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from itertools import pairwise
 from typing import Any, Dict, List, Optional
@@ -721,7 +722,7 @@ def compute_fail_to_pass_for_instance(
 
 def compute_fail_to_pass_for_instances(
     instances: List[Dict[str, Any]],
-    max_workers: int = 1,
+    max_workers: int = 5,
     timeout: int = 1800,
 ) -> List[Dict[str, Any]]:
     """
@@ -729,23 +730,67 @@ def compute_fail_to_pass_for_instances(
     
     Args:
         instances: List of task instances
-        max_workers: Number of parallel workers (default: 1 for sequential processing)
+        max_workers: Number of parallel workers (default: 5)
         timeout: Timeout per instance in seconds
         
     Returns:
         Updated instances with FAIL_TO_PASS computed
     """
-    logger.info(f"Computing FAIL_TO_PASS for {len(instances)} instances")
+    logger.info(f"Computing FAIL_TO_PASS for {len(instances)} instances with {max_workers} workers")
     
-    # Create single Docker client to reuse
-    client = docker.from_env()
+    if max_workers == 1:
+        # Sequential processing for compatibility
+        client = docker.from_env()
+        updated_instances = []
+        for i, instance in enumerate(instances):
+            logger.info(f"Processing instance {i+1}/{len(instances)}: {instance.get('instance_id')}")
+            updated_instance = compute_fail_to_pass_for_instance(instance, client, timeout)
+            updated_instances.append(updated_instance)
+        logger.info("Completed FAIL_TO_PASS computation for all instances")
+        return updated_instances
     
-    # Process instances (TODO: could parallelize this)
-    updated_instances = []
-    for i, instance in enumerate(instances):
-        logger.info(f"Processing instance {i+1}/{len(instances)}: {instance.get('instance_id')}")
-        updated_instance = compute_fail_to_pass_for_instance(instance, client, timeout)
-        updated_instances.append(updated_instance)
+    # Parallel processing with ThreadPoolExecutor
+    def process_instance_worker(instance_with_index):
+        """Worker function that processes a single instance with its own Docker client."""
+        i, instance = instance_with_index
+        instance_id = instance.get('instance_id', f'instance_{i}')
+        logger.info(f"Processing instance {i+1}/{len(instances)}: {instance_id}")
+        
+        # Each worker gets its own Docker client to avoid conflicts
+        client = docker.from_env()
+        try:
+            updated_instance = compute_fail_to_pass_for_instance(instance, client, timeout)
+            logger.info(f"Completed instance {i+1}/{len(instances)}: {instance_id}")
+            return i, updated_instance
+        except Exception as e:
+            logger.error(f"Failed to process instance {i+1}/{len(instances)} ({instance_id}): {e}")
+            # Return original instance if processing fails
+            return i, instance
+    
+    # Optimize worker count based on actual number of instances
+    actual_workers = min(max_workers, len(instances))
+    
+    # Process instances in parallel
+    updated_instances = [None] * len(instances)  # Pre-allocate list with correct order
+    
+    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+        # Submit all tasks
+        futures = {
+            executor.submit(process_instance_worker, (i, instance)): i 
+            for i, instance in enumerate(instances)
+        }
+        
+        # Collect results as they complete
+        completed_count = 0
+        for future in as_completed(futures):
+            try:
+                i, updated_instance = future.result()
+                updated_instances[i] = updated_instance
+                completed_count += 1
+                logger.info(f"Collected result {completed_count}/{len(instances)}")
+            except Exception as e:
+                logger.error(f"Worker thread failed with error: {e}")
+                # The worker already handles exceptions and returns original instance
     
     logger.info("Completed FAIL_TO_PASS computation for all instances")
     return updated_instances
@@ -756,6 +801,7 @@ def convert_single_instances_to_chains(
     output_file: str, 
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
+    max_workers: int = 5,
     **kwargs
 ) -> None:
     """
@@ -769,6 +815,7 @@ def convert_single_instances_to_chains(
         output_file: Path to output JSONL file with chains
         compute_fail_to_pass: If True, compute FAIL_TO_PASS by running tests (default: True)
         fail_to_pass_timeout: Timeout for FAIL_TO_PASS computation per instance in seconds (default: 1800)
+        max_workers: Number of parallel workers for FAIL_TO_PASS computation (default: 5)
         **kwargs: Additional arguments to pass to build_chains_from_repository_data
 
     Note:
@@ -789,6 +836,7 @@ def convert_single_instances_to_chains(
         logger.info("Computing FAIL_TO_PASS for task instances")
         task_instances = compute_fail_to_pass_for_instances(
             task_instances,
+            max_workers=max_workers,
             timeout=fail_to_pass_timeout
         )
 
