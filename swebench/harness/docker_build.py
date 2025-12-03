@@ -513,9 +513,20 @@ def build_container(
         run_args = test_spec.docker_specs.get("run_args", {})
         cap_add = run_args.get("cap_add", [])
 
+        # Check if a container with the same name already exists and remove it
+        container_name = test_spec.get_instance_container_name(run_id)
+        try:
+            existing_container = client.containers.get(container_name)
+            logger.info(f"Found existing container {container_name}, removing it...")
+            existing_container.remove(force=True)
+            logger.info(f"Existing container {container_name} removed.")
+        except docker.errors.NotFound:
+            # Container doesn't exist, which is the expected case
+            pass
+
         container = client.containers.create(
             image=test_spec.instance_image_key,
-            name=test_spec.get_instance_container_name(run_id),
+            name=container_name,
             user=DOCKER_USER,
             detach=True,
             command="tail -f /dev/null",
