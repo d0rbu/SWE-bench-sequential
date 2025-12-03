@@ -23,7 +23,7 @@ def main(
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
     max_workers: int = 10,
-    cache_dir: str = None,
+    cache_dir: str | None = None,
     use_cache: bool = True,
     log_level: str = "INFO",
 ):

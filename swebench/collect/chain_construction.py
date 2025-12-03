@@ -33,7 +33,7 @@ from swebench.collect.dag_dependency_analysis import (
     file_coverage_sampler,
     sample_chains_from_dag,
 )
-from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, UTF8
+from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, SWEbenchInstance, UTF8
 from swebench.harness.docker_build import build_container, setup_logger
 from swebench.harness.docker_utils import (
     cleanup_container,
@@ -608,6 +608,8 @@ def compute_fail_to_pass_for_instance(
     if client is None:
         client = docker.from_env()
 
+    assert isinstance(instance, SWEbenchInstance), f"Instance {instance.get('instance_id')} is not a SWEbenchInstance"
+
     # Create test spec (will determine test environment)
     test_spec = make_test_spec(instance)
 
@@ -801,7 +803,7 @@ def _save_fail_to_pass_cache(cache: Dict[str, Dict[str, Any]], cache_path: Path)
 
 def compute_fail_to_pass_for_instances(
     instances: List[Dict[str, Any]],
-    max_workers: int = 10,
+    max_workers: int = 20,
     timeout: int = 1800,
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
@@ -1006,7 +1008,7 @@ def compute_fail_to_pass_for_instances(
     actual_workers = min(max_workers, len(instances_to_compute))
 
     # Process instances in parallel
-    updated_instances = [None] * len(instances_to_compute)  # Pre-allocate list with correct order
+    updated_instances: List[Dict[str, Any]] = [{}] * len(instances_to_compute)  # Pre-allocate list with correct order
 
     with ThreadPoolExecutor(max_workers=actual_workers) as executor:
         # Submit all tasks
@@ -1078,7 +1080,7 @@ def convert_single_instances_to_chains(
     output_file: str,
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
-    max_workers: int = 10,
+    max_workers: int = 20,
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
     **kwargs,
