@@ -705,13 +705,18 @@ def compute_fail_to_pass_for_instance(
 
             # Tests that FAIL are FAIL_TO_PASS (they should pass after fix)
             # Tests that PASS are PASS_TO_PASS (they should still pass after fix)
+            # Tests that are SKIPPED are excluded (not relevant to validation)
             fail_to_pass = []
             pass_to_pass = []
 
             for test_case, status in status_map.items():
                 if status in ["PASSED", "XFAIL"]:
                     pass_to_pass.append(test_case)
+                elif status == "SKIPPED":
+                    # Skip tests that were skipped (e.g., due to missing dependencies)
+                    continue
                 else:
+                    # FAILED, ERROR, etc.
                     fail_to_pass.append(test_case)
 
             compute_logger.info(
