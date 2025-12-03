@@ -260,7 +260,7 @@ def calculate_file_overlap_weight(target_pr: PRNode, candidate_pr: PRNode) -> fl
 def build_dependency_dag(
     task_instances: list[Dict[str, Any]],
     time_window_months: int = 6,
-    file_overlap_threshold: float = 0.0,
+    file_overlap_threshold: float = 0.2,
 ) -> DependencyDAG:
     """
     Build a dependency DAG from task instances using file overlap analysis.
@@ -277,7 +277,7 @@ def build_dependency_dag(
     Args:
         task_instances: List of task instance dictionaries
         time_window_months: Maximum age difference for dependencies (default: 6)
-        file_overlap_threshold: Minimum file overlap weight for dependency (default: 0.0 = any overlap)
+        file_overlap_threshold: Minimum file overlap weight for dependency (default: 0.2)
 
     Returns:
         DependencyDAG with nodes and weighted edges

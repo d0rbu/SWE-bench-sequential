@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import pickle
 import tempfile
 import threading
@@ -33,7 +32,13 @@ from swebench.collect.dag_dependency_analysis import (
     file_coverage_sampler,
     sample_chains_from_dag,
 )
-from swebench.harness.constants import DOCKER_PATCH, DOCKER_USER, DOCKER_WORKDIR, SWEbenchInstance, UTF8
+from swebench.harness.constants import (
+    DOCKER_PATCH,
+    DOCKER_USER,
+    DOCKER_WORKDIR,
+    UTF8,
+    SWEbenchInstance,
+)
 from swebench.harness.docker_build import build_container, setup_logger
 from swebench.harness.docker_utils import (
     cleanup_container,
@@ -433,7 +438,7 @@ def validate_chain_id(chain_id: str) -> bool:
 def build_chains_from_repository_data(
     task_instances: List[Dict[str, Any]],
     time_window_months: int = 6,
-    file_overlap_threshold: float = 0.0,
+    file_overlap_threshold: float = 0.2,
     num_chains: int = 10,
     min_chain_length: int = 2,
     max_chain_length: int = 5,
@@ -608,7 +613,9 @@ def compute_fail_to_pass_for_instance(
     if client is None:
         client = docker.from_env()
 
-    assert isinstance(instance, SWEbenchInstance), f"Instance {instance.get('instance_id')} is not a SWEbenchInstance"
+    assert isinstance(instance, SWEbenchInstance), (
+        f"Instance {instance.get('instance_id')} is not a SWEbenchInstance"
+    )
 
     # Create test spec (will determine test environment)
     test_spec = make_test_spec(instance)
@@ -748,10 +755,10 @@ def compute_fail_to_pass_for_instance(
 def _get_fail_to_pass_cache_path(cache_dir: Optional[str] = None) -> Path:
     """
     Get the path to the FAIL_TO_PASS cache file.
-    
+
     Args:
         cache_dir: Directory to store cache (default: .swebench_cache)
-        
+
     Returns:
         Path to cache file
     """
@@ -765,30 +772,34 @@ def _get_fail_to_pass_cache_path(cache_dir: Optional[str] = None) -> Path:
 def _load_fail_to_pass_cache(cache_path: Path) -> Dict[str, Dict[str, Any]]:
     """
     Load FAIL_TO_PASS cache from disk.
-    
+
     Args:
         cache_path: Path to cache file
-        
+
     Returns:
         Dictionary mapping instance_id to cached FAIL_TO_PASS data
     """
     if not cache_path.exists():
         return {}
-    
+
     try:
         with open(cache_path, "rb") as f:
             cache = pickle.load(f)
-        logger.info(f"Loaded FAIL_TO_PASS cache with {len(cache)} entries from {cache_path}")
+        logger.info(
+            f"Loaded FAIL_TO_PASS cache with {len(cache)} entries from {cache_path}"
+        )
         return cache
     except Exception as e:
         logger.warning(f"Failed to load FAIL_TO_PASS cache: {e}")
         return {}
 
 
-def _save_fail_to_pass_cache(cache: Dict[str, Dict[str, Any]], cache_path: Path) -> None:
+def _save_fail_to_pass_cache(
+    cache: Dict[str, Dict[str, Any]], cache_path: Path
+) -> None:
     """
     Save FAIL_TO_PASS cache to disk.
-    
+
     Args:
         cache: Dictionary mapping instance_id to FAIL_TO_PASS data
         cache_path: Path to cache file
@@ -796,7 +807,9 @@ def _save_fail_to_pass_cache(cache: Dict[str, Dict[str, Any]], cache_path: Path)
     try:
         with open(cache_path, "wb") as f:
             pickle.dump(cache, f)
-        logger.info(f"Saved FAIL_TO_PASS cache with {len(cache)} entries to {cache_path}")
+        logger.info(
+            f"Saved FAIL_TO_PASS cache with {len(cache)} entries to {cache_path}"
+        )
     except Exception as e:
         logger.warning(f"Failed to save FAIL_TO_PASS cache: {e}")
 
@@ -838,18 +851,18 @@ def compute_fail_to_pass_for_instances(
     if use_cache:
         cache_path = _get_fail_to_pass_cache_path(cache_dir)
         cache = _load_fail_to_pass_cache(cache_path)
-    
+
     # Filter instances to only those that need computation
     instances_to_compute = []
     cached_count = 0
-    
+
     for instance in instances:
         instance_id = instance.get("instance_id")
-        
+
         # Check if already has FAIL_TO_PASS in instance
         if "FAIL_TO_PASS" in instance and instance["FAIL_TO_PASS"]:
             continue
-        
+
         # Check if in cache
         if use_cache and instance_id in cache:
             cached_data = cache[instance_id]
@@ -857,15 +870,17 @@ def compute_fail_to_pass_for_instances(
             instance["PASS_TO_PASS"] = cached_data.get("PASS_TO_PASS", [])
             cached_count += 1
             continue
-        
+
         # Needs computation
         instances_to_compute.append(instance)
-    
+
     if cached_count > 0:
         logger.info(f"Loaded {cached_count} instances from cache")
-    
+
     if not instances_to_compute:
-        logger.info("All instances already have FAIL_TO_PASS (from cache or existing data)")
+        logger.info(
+            "All instances already have FAIL_TO_PASS (from cache or existing data)"
+        )
         return instances
 
     logger.info(
@@ -895,7 +910,7 @@ def compute_fail_to_pass_for_instances(
                 instance, client, timeout
             )
             updated_instances.append(updated_instance)
-            
+
             # Update cache with newly computed result
             if use_cache and not had_fail_to_pass_before:
                 fail_to_pass = updated_instance.get("FAIL_TO_PASS", [])
@@ -940,7 +955,7 @@ def compute_fail_to_pass_for_instances(
                     f"Progress: {i}/{len(instances_to_compute)} | "
                     f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
                 )
-        
+
         # Save cache after sequential processing
         if use_cache and cache_path:
             _save_fail_to_pass_cache(cache, cache_path)
@@ -955,7 +970,9 @@ def compute_fail_to_pass_for_instances(
         logger.info(f"  ❌ Failed:   {failed_count}")
         logger.info(f"  ⏭️  Skipped:  {skipped_count}")
         if len(instances_to_compute) > 0:
-            logger.info(f"  Success rate: {success_count / len(instances_to_compute) * 100:.1f}%")
+            logger.info(
+                f"  Success rate: {success_count / len(instances_to_compute) * 100:.1f}%"
+            )
         logger.info("=" * 60)
 
         return updated_instances
@@ -1008,7 +1025,9 @@ def compute_fail_to_pass_for_instances(
     actual_workers = min(max_workers, len(instances_to_compute))
 
     # Process instances in parallel
-    updated_instances: List[Dict[str, Any]] = [{}] * len(instances_to_compute)  # Pre-allocate list with correct order
+    updated_instances: List[Dict[str, Any]] = [{}] * len(
+        instances_to_compute
+    )  # Pre-allocate list with correct order
 
     with ThreadPoolExecutor(max_workers=actual_workers) as executor:
         # Submit all tasks
@@ -1024,7 +1043,7 @@ def compute_fail_to_pass_for_instances(
                 i, updated_instance = future.result()
                 updated_instances[i] = updated_instance
                 completed_count += 1
-                
+
                 # Update cache with newly computed result
                 if use_cache:
                     instance_id = updated_instance.get("instance_id")
@@ -1044,16 +1063,22 @@ def compute_fail_to_pass_for_instances(
                             f"Progress: {completed_count}/{len(instances_to_compute)} | "
                             f"✅ {success_count} | ❌ {failed_count} | ⏭️  {skipped_count}"
                         )
-                        
+
                         # Save cache periodically during parallel execution
-                        if use_cache and cache_path and completed_count % (PROGRESS_UPDATE_INTERVAL * 2) == 0:
+                        if (
+                            use_cache
+                            and cache_path
+                            and completed_count % (PROGRESS_UPDATE_INTERVAL * 2) == 0
+                        ):
                             with cache_write_lock:  # Use separate lock for cache writes
                                 _save_fail_to_pass_cache(cache, cache_path)
-                                logger.info(f"Saved intermediate cache ({len(cache)} entries)")
+                                logger.info(
+                                    f"Saved intermediate cache ({len(cache)} entries)"
+                                )
             except Exception as e:
                 logger.exception(f"Worker thread failed with error: {e}")
                 # The worker already handles exceptions and returns original instance
-    
+
     # Save cache after parallel processing
     if use_cache and cache_path:
         with cache_write_lock:  # Use separate lock for final cache write
@@ -1069,7 +1094,9 @@ def compute_fail_to_pass_for_instances(
     logger.info(f"  ❌ Failed:   {failed_count}")
     logger.info(f"  ⏭️  Skipped:  {skipped_count}")
     if len(instances_to_compute) > 0:
-        logger.info(f"  Success rate: {success_count / len(instances_to_compute) * 100:.1f}%")
+        logger.info(
+            f"  Success rate: {success_count / len(instances_to_compute) * 100:.1f}%"
+        )
     logger.info("=" * 60)
 
     return updated_instances
