@@ -137,7 +137,7 @@ uv run python build_chains_pipeline.py \
     --num_chains 10 \
     --min_chain_length 2 \
     --max_chain_length 5 \
-    --file_overlap_threshold 0.00 \
+    --file_overlap_threshold 0.2 \
     --time_window_months 12 \
     --log_level DEBUG
 
