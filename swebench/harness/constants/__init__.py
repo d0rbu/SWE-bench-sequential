@@ -1,6 +1,6 @@
 from enum import Enum
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from swebench.harness.constants.c import *
 from swebench.harness.constants.go import *
@@ -34,6 +34,31 @@ class SWEbenchInstance(TypedDict):
     FAIL_TO_PASS: str
     PASS_TO_PASS: str
     environment_setup_commit: str
+
+
+def is_swebench_instance(obj: any) -> bool:
+    """
+    Check if an object is a valid SWEbenchInstance using duck typing.
+    
+    This function provides Python 3.13 compatible type checking without using isinstance()
+    with TypedDict, which raises TypeError in Python 3.13+.
+    
+    Args:
+        obj: Object to check
+        
+    Returns:
+        True if obj has all required SWEbenchInstance fields, False otherwise
+    """
+    if not isinstance(obj, dict):
+        return False
+    
+    required_fields = {
+        'repo', 'instance_id', 'base_commit', 'patch', 'test_patch',
+        'problem_statement', 'hints_text', 'created_at', 'version',
+        'FAIL_TO_PASS', 'PASS_TO_PASS', 'environment_setup_commit'
+    }
+    
+    return required_fields.issubset(obj.keys())
 
 
 # Constants - Test Types, Statuses, Commands
