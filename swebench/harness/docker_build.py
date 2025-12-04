@@ -426,18 +426,50 @@ def build_instance_image(
     dockerfile = test_spec.instance_dockerfile
 
     # Check that the env. image the instance image is based on exists
+    # If it doesn't exist, build it (this can happen with custom docker specs)
     try:
         env_image = client.images.get(env_image_name)
-    except docker.errors.ImageNotFound as e:
-        raise BuildImageError(
-            test_spec.instance_id,
-            f"Environment image {env_image_name} not found for {test_spec.instance_id}",
-            logger,
-        ) from e
-    logger.info(
-        f"Environment image {env_image_name} found for {test_spec.instance_id}\n"
-        f"Building instance image {image_name} for {test_spec.instance_id}"
-    )
+        logger.info(
+            f"Environment image {env_image_name} found for {test_spec.instance_id}"
+        )
+    except docker.errors.ImageNotFound:
+        logger.info(
+            f"Environment image {env_image_name} not found for {test_spec.instance_id}, building it..."
+        )
+        
+        # First ensure the base image exists
+        base_image_name = test_spec.base_image_key
+        try:
+            client.images.get(base_image_name)
+            logger.info(f"Base image {base_image_name} found")
+        except docker.errors.ImageNotFound:
+            logger.info(f"Base image {base_image_name} not found, building it...")
+            base_build_dir = BASE_IMAGE_BUILD_DIR / base_image_name.replace(":", "__")
+            build_image(
+                image_name=base_image_name,
+                setup_scripts={},
+                dockerfile=test_spec.base_dockerfile,
+                platform=test_spec.platform,
+                client=client,
+                build_dir=base_build_dir,
+                nocache=nocache,
+            )
+            logger.info(f"Base image {base_image_name} built successfully")
+        
+        # Now build the environment image
+        env_build_dir = ENV_IMAGE_BUILD_DIR / env_image_name.replace(":", "__")
+        build_image(
+            image_name=env_image_name,
+            setup_scripts={"setup_env.sh": test_spec.setup_env_script},
+            dockerfile=test_spec.env_dockerfile,
+            platform=test_spec.platform,
+            client=client,
+            build_dir=env_build_dir,
+            nocache=nocache,
+        )
+        logger.info(f"Environment image {env_image_name} built successfully")
+    
+    logger.info(f"Building instance image {image_name} for {test_spec.instance_id}")
 
     # Check if the instance image already exists
     image_exists = False
