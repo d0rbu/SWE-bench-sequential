@@ -614,7 +614,7 @@ def compute_fail_to_pass_for_instance(
     if client is None:
         client = docker.from_env()
 
-    assert is_swebench_instance(instance), (
+    assert is_swebench_instance(instance, include_tests=False), (
         f"Instance {instance.get('instance_id')} is not a valid SWEbenchInstance "
         f"(missing required fields)"
     )

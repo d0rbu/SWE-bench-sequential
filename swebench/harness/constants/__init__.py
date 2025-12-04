@@ -36,29 +36,46 @@ class SWEbenchInstance(TypedDict):
     environment_setup_commit: str
 
 
-def is_swebench_instance(obj: Any) -> bool:
+def is_swebench_instance(obj: Any, include_tests: bool = True) -> bool:
     """
     Check if an object is a valid SWEbenchInstance using duck typing.
-    
+
     This function provides Python 3.13 compatible type checking without using isinstance()
     with TypedDict, which raises TypeError in Python 3.13+.
-    
+
     Args:
         obj: Object to check
-        
+
     Returns:
         True if obj has all required SWEbenchInstance fields, False otherwise
     """
     if not isinstance(obj, dict):
         return False
-    
+
     required_fields = {
-        'repo', 'instance_id', 'base_commit', 'patch', 'test_patch',
-        'problem_statement', 'hints_text', 'created_at', 'version',
-        'FAIL_TO_PASS', 'PASS_TO_PASS', 'environment_setup_commit'
+        "repo",
+        "instance_id",
+        "base_commit",
+        "patch",
+        "test_patch",
+        "problem_statement",
+        "hints_text",
+        "created_at",
+        "version",
+        "environment_setup_commit",
     }
-    
-    return required_fields.issubset(obj.keys())
+    contains_base_fields = required_fields.issubset(obj.keys())
+
+    if not include_tests:
+        return contains_base_fields
+
+    test_fields = {
+        "FAIL_TO_PASS",
+        "PASS_TO_PASS",
+    }
+    contains_test_fields = test_fields.issubset(obj.keys())
+
+    return contains_base_fields and contains_test_fields
 
 
 # Constants - Test Types, Statuses, Commands
