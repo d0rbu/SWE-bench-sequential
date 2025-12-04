@@ -8,6 +8,11 @@ This module implements sophisticated dependency detection between PRs using:
 
 The result is a Directed Acyclic Graph (DAG) of dependencies from which
 diverse chains can be sampled.
+
+NOTE: Task instances in the DAG should ideally have FAIL_TO_PASS tests populated.
+If instances don't have FAIL_TO_PASS tests, chain validation may report warnings.
+This is expected behavior when working with newly created task instances that
+haven't been processed through the full test identification pipeline.
 """
 
 import logging
