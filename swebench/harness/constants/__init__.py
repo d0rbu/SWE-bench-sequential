@@ -54,15 +54,17 @@ def is_swebench_instance(obj: Any, include_tests: bool = True) -> bool:
 
     required_fields = {
         "repo",
+        "pull_number",
         "instance_id",
+        "issue_numbers",
         "base_commit",
+        "head_commit",
         "patch",
         "test_patch",
         "problem_statement",
         "hints_text",
         "created_at",
         "version",
-        "environment_setup_commit",
     }
     contains_base_fields = required_fields.issubset(obj.keys())
 
