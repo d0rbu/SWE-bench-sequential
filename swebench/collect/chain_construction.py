@@ -38,6 +38,7 @@ from swebench.harness.constants import (
     DOCKER_WORKDIR,
     UTF8,
     SWEbenchInstance,
+    is_swebench_instance,
 )
 from swebench.harness.docker_build import build_container, setup_logger
 from swebench.harness.docker_utils import (
@@ -613,8 +614,9 @@ def compute_fail_to_pass_for_instance(
     if client is None:
         client = docker.from_env()
 
-    assert isinstance(instance, SWEbenchInstance), (
-        f"Instance {instance.get('instance_id')} is not a SWEbenchInstance"
+    assert is_swebench_instance(instance), (
+        f"Instance {instance.get('instance_id')} is not a valid SWEbenchInstance "
+        f"(missing required fields)"
     )
 
     # Create test spec (will determine test environment)
