@@ -134,11 +134,11 @@ echo "     - Time window: 6 months"
 uv run python build_chains_pipeline.py \
     --input_file "$TASKS_VERSIONED_FILE" \
     --output_file "$CHAINS_FILE" \
-    --num_chains 10 \
+    --num_chains 100 \
     --min_chain_length 2 \
     --max_chain_length 5 \
     --file_overlap_threshold 0.2 \
-    --time_window_months 12 \
+    --time_window_months 36 \
     --log_level DEBUG
 
 echo ""
