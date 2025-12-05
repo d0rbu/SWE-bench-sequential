@@ -946,19 +946,10 @@ def sample_chains_from_dag(
             while current_pr and len(chain_nodes) < max_chain_length:
                 node = dag.nodes[current_pr]
 
-                # Validate and apply current node if validation is enabled
-                # Skip validation for the first node since it was already validated
-                # when creating the validation context
-                if validate_chains and len(chain_nodes) > 0:
-                    assert validation_context, (
-                        "Validation context must exist when validate_chains=True"
-                    )
-                    success = validate_and_apply_candidate(
-                        validation_context,
-                        node,
-                        validation_timeout,
-                    )
-                    assert success, f"Pre-validated node {current_pr} failed validation"
+                # Note: We don't validate here because:
+                # 1. The starting node was already validated when creating validation_context (lines 917-923)
+                # 2. Subsequent nodes are validated as candidates before being selected (lines 1000-1006)
+                # So by the time we reach this point, current_pr has already been validated and applied
 
                 # Add node to chain
                 chain_nodes.append(node)
