@@ -823,7 +823,7 @@ def _save_fail_to_pass_cache(
 
 def compute_fail_to_pass_for_instances(
     instances: List[Dict[str, Any]],
-    max_workers: int = 30,
+    max_workers: int = 40,
     timeout: int = 1800,
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
@@ -1114,7 +1114,7 @@ def convert_single_instances_to_chains(
     output_file: str,
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
-    max_workers: int = 30,
+    max_workers: int = 40,
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
     **kwargs,

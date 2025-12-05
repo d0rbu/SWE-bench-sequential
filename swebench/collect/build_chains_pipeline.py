@@ -21,7 +21,7 @@ def main(
     time_window_months: int = 6,
     compute_fail_to_pass: bool = True,
     fail_to_pass_timeout: int = 1800,
-    max_workers: int = 30,
+    max_workers: int = 40,
     cache_dir: str | None = None,
     use_cache: bool = True,
     log_level: str = "INFO",
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_workers",
         type=int,
-        default=30,
+        default=40,
         help="Number of parallel workers for FAIL_TO_PASS computation (default: 30)",
     )
     parser.add_argument(
