@@ -565,9 +565,10 @@ def validate_and_apply_candidate(
     Validate and apply a candidate PR to an existing validation context.
 
     This performs proper FAIL_TO_PASS validation by:
-    1. Running tests WITHOUT patch to verify FAIL_TO_PASS tests fail at base commit
-    2. Applying the candidate's patch
-    3. Running tests WITH patch to verify FAIL_TO_PASS tests now pass
+    1. Applying test_patch to set up the test environment
+    2. Running tests to verify FAIL_TO_PASS tests fail with test_patch applied
+    3. Applying the main patch
+    4. Running tests to verify FAIL_TO_PASS tests now pass
 
     This ensures the patch actually fixes the failing tests rather than just having
     tests that happen to pass.
@@ -590,10 +591,15 @@ def validate_and_apply_candidate(
         f"(chain length: {len(context.applied_nodes)})"
     )
 
-    # Get the patch
+    # Get the patches
     patch = candidate.task_instance.get("patch", "")
     if not patch or not patch.strip():
         validation_logger.warning(f"Candidate {candidate.pr_number} has empty patch")
+        return False
+
+    test_patch = candidate.task_instance.get("test_patch", "")
+    if not test_patch or not test_patch.strip():
+        validation_logger.warning(f"Candidate {candidate.pr_number} has empty test_patch")
         return False
 
     # Create TestSpec for the candidate to get the right test configuration
@@ -605,10 +611,33 @@ def validate_and_apply_candidate(
         validation_logger.warning("No FAIL_TO_PASS tests defined")
         return False
 
-    # STEP 1: Run FAIL_TO_PASS tests WITHOUT patch to verify they fail
+    # STEP 1: Apply test_patch to set up the test environment
+    validation_logger.info(f"Applying test_patch for candidate {candidate.pr_number}")
+    test_patch_file = (
+        log_dir / f"test_patch_{len(context.applied_nodes)}_{candidate.pr_number}.diff"
+    )
+    test_patch_file.write_text(test_patch)
+    copy_to_container(container, test_patch_file, PurePosixPath(DOCKER_PATCH))
+
+    # Try to apply test patch
+    result = container.exec_run(
+        f"git apply --verbose {DOCKER_PATCH}",
+        workdir=DOCKER_WORKDIR,
+        user=DOCKER_USER,
+    )
+
+    if result.exit_code != 0:
+        validation_logger.warning(
+            f"Failed to apply test_patch: {result.output.decode(UTF8)}"
+        )
+        return False
+
+    validation_logger.info("Test patch applied successfully")
+
+    # STEP 2: Run tests to verify FAIL_TO_PASS tests fail with test_patch applied
     validation_logger.info(
-        f"Running FAIL_TO_PASS tests WITHOUT patch for candidate {candidate.pr_number} "
-        f"(verifying tests fail at base commit)"
+        f"Running tests with test_patch for candidate {candidate.pr_number} "
+        f"(verifying FAIL_TO_PASS tests fail before main patch)"
     )
 
     # Create eval script
@@ -639,26 +668,26 @@ def validate_and_apply_candidate(
         validation_logger.warning("Pre-patch tests did not run successfully")
         return False
 
-    # Verify that FAIL_TO_PASS tests actually fail before the patch
+    # Verify that FAIL_TO_PASS tests actually fail with test_patch applied
     all_failed_correctly = True
     for test_case in fail_to_pass_tests:
         test_status = status_map_pre.get(test_case, "FAILED")
         if test_status in ["PASSED", "XFAIL"]:
             validation_logger.warning(
-                f"FAIL_TO_PASS test {test_case} already passing before patch: {test_status}"
+                f"FAIL_TO_PASS test {test_case} already passing with test_patch: {test_status}"
             )
             all_failed_correctly = False
 
     if not all_failed_correctly:
         validation_logger.warning(
-            f"Some FAIL_TO_PASS tests were already passing before patch - "
-            f"this PR may have incorrect tests or base commit"
+            f"Some FAIL_TO_PASS tests were already passing with test_patch applied - "
+            f"this PR may have incorrect tests or the main patch may already be applied"
         )
         return False
 
-    validation_logger.info(f"All FAIL_TO_PASS tests correctly failed before patch")
+    validation_logger.info(f"All FAIL_TO_PASS tests correctly failed with test_patch applied")
 
-    # STEP 2: Apply the patch
+    # STEP 3: Apply the main patch
     # Write patch to temporary file and copy to container
     patch_file = (
         log_dir / f"patch_{len(context.applied_nodes)}_{candidate.pr_number}.diff"
@@ -666,8 +695,8 @@ def validate_and_apply_candidate(
     patch_file.write_text(patch)
     copy_to_container(container, patch_file, PurePosixPath(DOCKER_PATCH))
 
-    # Try to apply patch
-    validation_logger.info(f"Applying patch for PR {candidate.pr_number}")
+    # Try to apply main patch
+    validation_logger.info(f"Applying main patch for PR {candidate.pr_number}")
     applied = False
 
     git_apply_cmds = [
@@ -691,13 +720,13 @@ def validate_and_apply_candidate(
             )
 
     if not applied:
-        validation_logger.warning(f"Failed to apply patch for PR {candidate.pr_number}")
+        validation_logger.warning(f"Failed to apply main patch for PR {candidate.pr_number}")
         return False
 
-    # STEP 3: Run FAIL_TO_PASS tests WITH patch to verify they pass
+    # STEP 4: Run tests with both patches applied to verify FAIL_TO_PASS tests now pass
     validation_logger.info(
-        f"Running FAIL_TO_PASS tests WITH patch for candidate {candidate.pr_number} "
-        f"(verifying tests pass after applying patch)"
+        f"Running tests with both patches for candidate {candidate.pr_number} "
+        f"(verifying FAIL_TO_PASS tests pass after applying main patch)"
     )
 
     # Create eval script (reuse test_spec from earlier)
@@ -741,14 +770,14 @@ def validate_and_apply_candidate(
     if all_passed:
         validation_logger.info(
             f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number} "
-            f"(verified FAIL → PASS transition)"
+            f"(verified FAIL → PASS transition with test_patch + main patch)"
         )
         # Add to applied nodes since validation succeeded
         context.applied_nodes.append(candidate)
     else:
         validation_logger.warning(
             f"Candidate {candidate.pr_number} failed validation: "
-            f"some FAIL_TO_PASS tests did not pass after applying patch"
+            f"some FAIL_TO_PASS tests did not pass after applying main patch"
         )
 
     return all_passed
