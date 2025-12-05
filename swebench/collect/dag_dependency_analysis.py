@@ -564,14 +564,15 @@ def validate_and_apply_candidate(
     """
     Validate and apply a candidate PR to an existing validation context.
 
-    This performs proper FAIL_TO_PASS validation by:
+    This performs comprehensive validation by:
     1. Applying test_patch to set up the test environment
     2. Running tests to verify FAIL_TO_PASS tests fail with test_patch applied
     3. Applying the main patch
     4. Running tests to verify FAIL_TO_PASS tests now pass
+    5. Verifying PASS_TO_PASS tests still pass (critical for chains)
 
-    This ensures the patch actually fixes the failing tests rather than just having
-    tests that happen to pass.
+    Step 5 is crucial when validating chains: it ensures that patches from previous
+    PRs in the chain haven't broken tests that should pass in the current PR.
 
     Args:
         context: Validation context with Docker container
@@ -579,8 +580,8 @@ def validate_and_apply_candidate(
         timeout: Timeout for test execution in seconds (applied to each test run)
 
     Returns:
-        True if candidate is valid (tests fail before patch, patch applies, and tests 
-        pass after patch), False otherwise
+        True if candidate is valid (FAIL_TO_PASS tests transition correctly and 
+        PASS_TO_PASS tests still pass), False otherwise
     """
     validation_logger = context.validation_logger
     container = context.container
@@ -767,20 +768,49 @@ def validate_and_apply_candidate(
             )
             all_passed = False
 
-    if all_passed:
-        validation_logger.info(
-            f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number} "
-            f"(verified FAIL → PASS transition with test_patch + main patch)"
-        )
-        # Add to applied nodes since validation succeeded
-        context.applied_nodes.append(candidate)
-    else:
+    if not all_passed:
         validation_logger.warning(
             f"Candidate {candidate.pr_number} failed validation: "
             f"some FAIL_TO_PASS tests did not pass after applying main patch"
         )
+        return False
 
-    return all_passed
+    validation_logger.info(
+        f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number} "
+        f"(verified FAIL → PASS transition with test_patch + main patch)"
+    )
+
+    # STEP 5: Verify that PASS_TO_PASS tests still pass after the patch
+    # This ensures that previous PRs in the chain didn't break tests in this PR
+    pass_to_pass_tests = test_spec.PASS_TO_PASS
+    if pass_to_pass_tests:
+        validation_logger.info(
+            f"Verifying {len(pass_to_pass_tests)} PASS_TO_PASS tests still pass for candidate {candidate.pr_number}"
+        )
+        
+        pass_to_pass_all_passed = True
+        for test_case in pass_to_pass_tests:
+            test_status = status_map_post.get(test_case, "FAILED")
+            if test_status not in ["PASSED", "XFAIL"]:
+                validation_logger.warning(
+                    f"PASS_TO_PASS test {test_case} failed after patch: {test_status}"
+                )
+                pass_to_pass_all_passed = False
+
+        if not pass_to_pass_all_passed:
+            validation_logger.warning(
+                f"Candidate {candidate.pr_number} failed validation: "
+                f"some PASS_TO_PASS tests failed after applying patches from previous PRs in chain"
+            )
+            return False
+
+        validation_logger.info(
+            f"All PASS_TO_PASS tests passed for candidate {candidate.pr_number}"
+        )
+
+    # Add to applied nodes since validation succeeded
+    context.applied_nodes.append(candidate)
+    return True
 
 
 def sample_chains_from_dag(
