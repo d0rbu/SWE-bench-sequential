@@ -947,11 +947,12 @@ def sample_chains_from_dag(
                 node = dag.nodes[current_pr]
 
                 # Validate and apply current node if validation is enabled
-                if validate_chains:
+                # Skip validation for the first node since it was already validated
+                # when creating the validation context
+                if validate_chains and len(chain_nodes) > 0:
                     assert validation_context, (
                         "Validation context must exist when validate_chains=True"
                     )
-                    # All nodes should validate (including first node for consistency)
                     success = validate_and_apply_candidate(
                         validation_context,
                         node,
