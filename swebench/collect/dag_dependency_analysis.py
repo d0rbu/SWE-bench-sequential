@@ -548,16 +548,22 @@ def validate_and_apply_candidate(
     """
     Validate and apply a candidate PR to an existing validation context.
 
-    This incrementally applies the candidate's patch to the existing container
-    and verifies that FAIL_TO_PASS tests pass.
+    This performs proper FAIL_TO_PASS validation by:
+    1. Running tests WITHOUT patch to verify FAIL_TO_PASS tests fail at base commit
+    2. Applying the candidate's patch
+    3. Running tests WITH patch to verify FAIL_TO_PASS tests now pass
+
+    This ensures the patch actually fixes the failing tests rather than just having
+    tests that happen to pass.
 
     Args:
         context: Validation context with Docker container
         candidate: PRNode to validate and apply
-        timeout: Timeout for test execution in seconds
+        timeout: Timeout for test execution in seconds (applied to each test run)
 
     Returns:
-        True if candidate is valid (patch applies and tests pass), False otherwise
+        True if candidate is valid (tests fail before patch, patch applies, and tests 
+        pass after patch), False otherwise
     """
     validation_logger = context.validation_logger
     container = context.container
@@ -574,6 +580,69 @@ def validate_and_apply_candidate(
         validation_logger.warning(f"Candidate {candidate.pr_number} has empty patch")
         return False
 
+    # Create TestSpec for the candidate to get the right test configuration
+    test_spec = make_test_spec(candidate.task_instance)
+
+    # Check that FAIL_TO_PASS tests are defined
+    fail_to_pass_tests = test_spec.FAIL_TO_PASS
+    if not fail_to_pass_tests:
+        validation_logger.warning("No FAIL_TO_PASS tests defined")
+        return False
+
+    # STEP 1: Run FAIL_TO_PASS tests WITHOUT patch to verify they fail
+    validation_logger.info(
+        f"Running FAIL_TO_PASS tests WITHOUT patch for candidate {candidate.pr_number} "
+        f"(verifying tests fail at base commit)"
+    )
+
+    # Create eval script
+    eval_file = log_dir / f"eval_pre_patch_{len(context.applied_nodes)}_{candidate.pr_number}.sh"
+    eval_file.write_text(test_spec.eval_script)
+    copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
+
+    # Execute tests before patch
+    test_output_file_pre = (
+        log_dir / f"test_output_pre_patch_{len(context.applied_nodes)}_{candidate.pr_number}.txt"
+    )
+    test_output_pre, timed_out_pre, total_runtime_pre = exec_run_with_timeout(
+        container, "/bin/bash /eval.sh", timeout
+    )
+
+    if timed_out_pre:
+        validation_logger.warning(f"Pre-patch tests timed out after {timeout} seconds")
+        return False
+
+    # Write test output
+    test_output_file_pre.write_text(test_output_pre)
+    validation_logger.info(f"Pre-patch tests completed in {total_runtime_pre:.2f}s")
+
+    # Parse test results
+    status_map_pre, tests_ran_pre = get_logs_eval(test_spec, str(test_output_file_pre))
+
+    if not tests_ran_pre:
+        validation_logger.warning("Pre-patch tests did not run successfully")
+        return False
+
+    # Verify that FAIL_TO_PASS tests actually fail before the patch
+    all_failed_correctly = True
+    for test_case in fail_to_pass_tests:
+        test_status = status_map_pre.get(test_case, "FAILED")
+        if test_status in ["PASSED", "XFAIL"]:
+            validation_logger.warning(
+                f"FAIL_TO_PASS test {test_case} already passing before patch: {test_status}"
+            )
+            all_failed_correctly = False
+
+    if not all_failed_correctly:
+        validation_logger.warning(
+            f"Some FAIL_TO_PASS tests were already passing before patch - "
+            f"this PR may have incorrect tests or base commit"
+        )
+        return False
+
+    validation_logger.info(f"All FAIL_TO_PASS tests correctly failed before patch")
+
+    # STEP 2: Apply the patch
     # Write patch to temporary file and copy to container
     patch_file = (
         log_dir / f"patch_{len(context.applied_nodes)}_{candidate.pr_number}.diff"
@@ -609,63 +678,62 @@ def validate_and_apply_candidate(
         validation_logger.warning(f"Failed to apply patch for PR {candidate.pr_number}")
         return False
 
-    # Run tests - only FAIL_TO_PASS tests for the candidate
+    # STEP 3: Run FAIL_TO_PASS tests WITH patch to verify they pass
     validation_logger.info(
-        f"Running FAIL_TO_PASS tests for candidate {candidate.pr_number}"
+        f"Running FAIL_TO_PASS tests WITH patch for candidate {candidate.pr_number} "
+        f"(verifying tests pass after applying patch)"
     )
 
-    # Create TestSpec for the candidate to get the right test configuration
-    test_spec = make_test_spec(candidate.task_instance)
+    # Create eval script (reuse test_spec from earlier)
+    eval_file_post = log_dir / f"eval_post_patch_{len(context.applied_nodes)}_{candidate.pr_number}.sh"
+    eval_file_post.write_text(test_spec.eval_script)
+    copy_to_container(container, eval_file_post, PurePosixPath("/eval.sh"))
 
-    # Create eval script
-    eval_file = log_dir / f"eval_{len(context.applied_nodes)}_{candidate.pr_number}.sh"
-    eval_file.write_text(test_spec.eval_script)
-    copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
-
-    # Execute tests
-    test_output_file = (
-        log_dir / f"test_output_{len(context.applied_nodes)}_{candidate.pr_number}.txt"
+    # Execute tests after patch
+    test_output_file_post = (
+        log_dir / f"test_output_post_patch_{len(context.applied_nodes)}_{candidate.pr_number}.txt"
     )
-    test_output, timed_out, total_runtime = exec_run_with_timeout(
+    test_output_post, timed_out_post, total_runtime_post = exec_run_with_timeout(
         container, "/bin/bash /eval.sh", timeout
     )
 
-    if timed_out:
-        validation_logger.warning(f"Tests timed out after {timeout} seconds")
+    if timed_out_post:
+        validation_logger.warning(f"Post-patch tests timed out after {timeout} seconds")
         return False
 
     # Write test output
-    test_output_file.write_text(test_output)
-    validation_logger.info(f"Tests completed in {total_runtime:.2f}s")
+    test_output_file_post.write_text(test_output_post)
+    validation_logger.info(f"Post-patch tests completed in {total_runtime_post:.2f}s")
 
     # Parse test results
-    status_map, tests_ran = get_logs_eval(test_spec, str(test_output_file))
+    status_map_post, tests_ran_post = get_logs_eval(test_spec, str(test_output_file_post))
 
-    if not tests_ran:
-        validation_logger.warning("Tests did not run successfully")
+    if not tests_ran_post:
+        validation_logger.warning("Post-patch tests did not run successfully")
         return False
 
-    # Check that all FAIL_TO_PASS tests passed
-    fail_to_pass_tests = test_spec.FAIL_TO_PASS
-    if not fail_to_pass_tests:
-        validation_logger.warning("No FAIL_TO_PASS tests defined")
-        return False
-
+    # Verify that all FAIL_TO_PASS tests now pass after the patch
     all_passed = True
     for test_case in fail_to_pass_tests:
-        test_status = status_map.get(test_case, "FAILED")
+        test_status = status_map_post.get(test_case, "FAILED")
         if test_status not in ["PASSED", "XFAIL"]:
             validation_logger.warning(
-                f"FAIL_TO_PASS test {test_case} did not pass: {test_status}"
+                f"FAIL_TO_PASS test {test_case} did not pass after patch: {test_status}"
             )
             all_passed = False
 
     if all_passed:
         validation_logger.info(
-            f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number}"
+            f"All FAIL_TO_PASS tests passed for candidate {candidate.pr_number} "
+            f"(verified FAIL → PASS transition)"
         )
         # Add to applied nodes since validation succeeded
         context.applied_nodes.append(candidate)
+    else:
+        validation_logger.warning(
+            f"Candidate {candidate.pr_number} failed validation: "
+            f"some FAIL_TO_PASS tests did not pass after applying patch"
+        )
 
     return all_passed
 
