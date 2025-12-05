@@ -244,6 +244,21 @@ def extract_modified_files_post(patch_str: str) -> Set[str]:
         return set()
 
 
+def filter_test_files(files: Set[str]) -> Set[str]:
+    """
+    Filter out test files from a set of file paths.
+    
+    Test files are identified by having 'test' in their path.
+    
+    Args:
+        files: Set of file paths
+        
+    Returns:
+        Set of file paths excluding test files
+    """
+    return {f for f in files if 'test' not in f.lower()}
+
+
 def calculate_file_overlap_weight(target_pr: PRNode, candidate_pr: PRNode) -> float:
     """
     Calculate file overlap weight between two PRs based on pre/post file states.
@@ -253,6 +268,9 @@ def calculate_file_overlap_weight(target_pr: PRNode, candidate_pr: PRNode) -> fl
     2. Target PR modifies files that candidate PR created (post->post)
     3. Target PR modifies files that candidate PR deleted (pre->pre)
     4. Target PR touches the post-state of files that candidate PR touched
+    
+    Note: Test files (files with 'test' in the path) are excluded from overlap
+    calculation to focus on implementation file dependencies.
 
     Args:
         target_pr: The PR to analyze dependencies for (happens after candidate)
@@ -261,13 +279,16 @@ def calculate_file_overlap_weight(target_pr: PRNode, candidate_pr: PRNode) -> fl
     Returns:
         Weight between 0.0 and 1.0 representing the strength of the file overlap
     """
-    # Get all pre-existing files that target PR touched
-    target_files = target_pr.modified_files_pre
+    # Get all pre-existing files that target PR touched, excluding test files
+    target_files = filter_test_files(target_pr.modified_files_pre)
 
     if not target_files:
         return 0.0
 
-    overlapping_files = target_files & candidate_pr.modified_files_post
+    # Get candidate files, excluding test files
+    candidate_files = filter_test_files(candidate_pr.modified_files_post)
+    
+    overlapping_files = target_files & candidate_files
 
     if not overlapping_files:
         return 0.0
