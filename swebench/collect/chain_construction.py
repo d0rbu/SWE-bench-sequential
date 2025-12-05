@@ -579,21 +579,30 @@ def compute_fail_to_pass_for_instance(
     timeout: int = 1800,
 ) -> Dict[str, Any]:
     """
-    Compute FAIL_TO_PASS test list for a task instance by running tests without the fix.
+    Compute FAIL_TO_PASS and PASS_TO_PASS test lists for a task instance with comprehensive validation.
 
-    This function:
+    This function performs complete test transition validation:
     1. Creates a test environment at the base commit
-    2. Applies only the test_patch (not the main patch)
-    3. Runs tests and identifies which ones fail
-    4. Those failing tests become FAIL_TO_PASS
+    2. Applies only the test_patch (not the main patch)  
+    3. Runs tests and categorizes them: FAIL, PASS, or SKIP
+    4. Applies the main patch
+    5. Runs tests again to verify transitions:
+       - FAIL_TO_PASS: Tests that failed before should now pass
+       - PASS_TO_PASS: Tests that passed before should still pass
+       - SKIPPED: Tests are excluded from validation
+    6. Only tests that complete valid transitions are included
+
+    This ensures both test lists are accurate and the patch:
+    - Fixes the failing tests (FAIL_TO_PASS)
+    - Doesn't break existing tests (PASS_TO_PASS)
 
     Args:
         instance: Task instance dictionary containing test_patch, patch, etc.
         client: Docker client (creates new one if not provided)
-        timeout: Timeout for test execution in seconds
+        timeout: Timeout for test execution in seconds (applied to each test run)
 
     Returns:
-        Updated instance with FAIL_TO_PASS and PASS_TO_PASS fields added
+        Updated instance with validated FAIL_TO_PASS and PASS_TO_PASS fields added
     """
     # Skip if already has FAIL_TO_PASS
     if "FAIL_TO_PASS" in instance and instance["FAIL_TO_PASS"]:
@@ -712,30 +721,162 @@ def compute_fail_to_pass_for_instance(
 
                 return instance
 
-            # Tests that FAIL are FAIL_TO_PASS (they should pass after fix)
-            # Tests that PASS are PASS_TO_PASS (they should still pass after fix)
-            # Tests that are SKIPPED are excluded (not relevant to validation)
-            fail_to_pass = []
-            pass_to_pass = []
+            # Tests that FAIL are potential FAIL_TO_PASS (need to verify they pass after fix)
+            # Tests that PASS are potential PASS_TO_PASS (need to verify they still pass after fix)
+            # Tests that are SKIPPED are excluded from validation
+            potential_fail_to_pass = []
+            potential_pass_to_pass = []
+            skipped_tests = []
 
             for test_case, status in status_map.items():
                 if status in ["PASSED", "XFAIL"]:
-                    pass_to_pass.append(test_case)
+                    potential_pass_to_pass.append(test_case)
                 elif status == "SKIPPED":
-                    # Skip tests that were skipped (e.g., due to missing dependencies)
-                    continue
+                    # Track skipped tests but don't validate them
+                    skipped_tests.append(test_case)
                 else:
                     # FAILED, ERROR, etc.
-                    fail_to_pass.append(test_case)
+                    potential_fail_to_pass.append(test_case)
 
             compute_logger.info(
-                f"Found {len(fail_to_pass)} FAIL_TO_PASS tests and "
-                f"{len(pass_to_pass)} PASS_TO_PASS tests"
+                f"Found {len(potential_fail_to_pass)} tests that failed, "
+                f"{len(potential_pass_to_pass)} tests that passed, "
+                f"and {len(skipped_tests)} tests that were skipped before patch"
+            )
+
+            # STEP 2: Apply main patch and verify both test transitions
+            compute_logger.info("Applying main patch to verify FAIL_TO_PASS and PASS_TO_PASS transitions")
+            
+            # Get the main patch
+            main_patch = instance.get("patch", "")
+            if not main_patch or not main_patch.strip():
+                message = "Instance has no main patch, cannot validate FAIL_TO_PASS"
+                compute_logger.warning(message)
+                logger.warning(message)
+                instance["FAIL_TO_PASS"] = []
+                instance["PASS_TO_PASS"] = []
+                return instance
+
+            # Apply main patch
+            main_patch_file = log_dir / "main.patch"
+            main_patch_file.write_text(main_patch)
+            copy_to_container(container, main_patch_file, Path(DOCKER_PATCH))
+
+            # Try to apply main patch
+            result = container.exec_run(
+                f"git apply --verbose {DOCKER_PATCH}",
+                workdir=DOCKER_WORKDIR,
+                user=DOCKER_USER,
+            )
+
+            if result.exit_code != 0:
+                message = f"Failed to apply main patch: {result.output.decode(UTF8)}"
+                compute_logger.warning(message)
+                logger.error(message)
+                # If main patch can't apply, FAIL_TO_PASS tests are not valid
+                instance["FAIL_TO_PASS"] = []
+                instance["PASS_TO_PASS"] = []
+                return instance
+
+            compute_logger.info("Main patch applied successfully")
+
+            # Run tests again with main patch applied
+            compute_logger.info("Running tests with patch to verify FAIL_TO_PASS and PASS_TO_PASS transitions")
+            test_output_post, timed_out_post, total_runtime_post = exec_run_with_timeout(
+                container, "/bin/bash /eval.sh", timeout
+            )
+
+            if timed_out_post:
+                message = f"Post-patch tests timed out after {timeout} seconds"
+                compute_logger.warning(message)
+                logger.error(message)
+                instance["FAIL_TO_PASS"] = []
+                instance["PASS_TO_PASS"] = []
+                return instance
+
+            # Write test output and parse results
+            test_output_file_post = log_dir / "test_output_post_patch.txt"
+            test_output_file_post.write_text(test_output_post)
+            compute_logger.info(f"Post-patch tests completed in {total_runtime_post:.2f}s")
+
+            # Parse test results
+            status_map_post, tests_ran_post = get_logs_eval(test_spec, str(test_output_file_post))
+
+            if not tests_ran_post:
+                message = "Post-patch tests did not run successfully"
+                compute_logger.warning(message)
+                logger.error(message)
+                instance["FAIL_TO_PASS"] = []
+                instance["PASS_TO_PASS"] = []
+                return instance
+
+            # Validate FAIL_TO_PASS tests (should now pass after patch)
+            validated_fail_to_pass = []
+            failed_f2p_validation = []
+
+            for test_case in potential_fail_to_pass:
+                post_status = status_map_post.get(test_case, "FAILED")
+                if post_status in ["PASSED", "XFAIL"]:
+                    validated_fail_to_pass.append(test_case)
+                else:
+                    failed_f2p_validation.append(test_case)
+                    compute_logger.warning(
+                        f"FAIL_TO_PASS test {test_case} failed before patch but did not pass after: {post_status}"
+                    )
+
+            # Validate PASS_TO_PASS tests (should still pass after patch)
+            validated_pass_to_pass = []
+            failed_p2p_validation = []
+
+            for test_case in potential_pass_to_pass:
+                post_status = status_map_post.get(test_case, "FAILED")
+                if post_status in ["PASSED", "XFAIL"]:
+                    validated_pass_to_pass.append(test_case)
+                elif post_status == "SKIPPED":
+                    # Test became skipped after patch - log but don't include in validation
+                    compute_logger.info(f"PASS_TO_PASS test {test_case} became skipped after patch")
+                else:
+                    failed_p2p_validation.append(test_case)
+                    compute_logger.warning(
+                        f"PASS_TO_PASS test {test_case} passed before patch but failed after: {post_status}"
+                    )
+
+            # Handle tests that were skipped before but may run after
+            newly_running_tests = []
+            for test_case in skipped_tests:
+                post_status = status_map_post.get(test_case, "SKIPPED")
+                if post_status not in ["SKIPPED"]:
+                    newly_running_tests.append((test_case, post_status))
+                    compute_logger.info(
+                        f"Previously skipped test {test_case} now runs with status: {post_status}"
+                    )
+
+            # Log validation results
+            if failed_f2p_validation:
+                message = (
+                    f"Warning: {len(failed_f2p_validation)}/{len(potential_fail_to_pass)} "
+                    f"FAIL_TO_PASS tests did not pass after applying patch: {failed_f2p_validation[:3]}"
+                )
+                compute_logger.warning(message)
+                logger.warning(f"{instance.get('instance_id')}: {message}")
+
+            if failed_p2p_validation:
+                message = (
+                    f"Warning: {len(failed_p2p_validation)}/{len(potential_pass_to_pass)} "
+                    f"PASS_TO_PASS tests failed after applying patch: {failed_p2p_validation[:3]}"
+                )
+                compute_logger.warning(message)
+                logger.warning(f"{instance.get('instance_id')}: {message}")
+
+            compute_logger.info(
+                f"Validated {len(validated_fail_to_pass)}/{len(potential_fail_to_pass)} "
+                f"FAIL_TO_PASS tests and {len(validated_pass_to_pass)}/{len(potential_pass_to_pass)} "
+                f"PASS_TO_PASS tests"
             )
 
             # Store in instance (as JSON strings to match dataset format)
-            instance["FAIL_TO_PASS"] = json.dumps(fail_to_pass)
-            instance["PASS_TO_PASS"] = json.dumps(pass_to_pass)
+            instance["FAIL_TO_PASS"] = json.dumps(validated_fail_to_pass)
+            instance["PASS_TO_PASS"] = json.dumps(validated_pass_to_pass)
 
             return instance
 
