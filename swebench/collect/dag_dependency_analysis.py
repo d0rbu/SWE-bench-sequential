@@ -719,6 +719,51 @@ def sample_chains_from_dag(
         f"Chain sampling: {len(connected_prs)}/{len(topo_order)} PRs have at least one edge"
     )
 
+    # Filter out PRs without FAIL_TO_PASS tests
+    # These PRs cannot be validated properly in the pipeline
+    prs_before_filter = len(connected_prs)
+    prs_with_tests = []
+    prs_without_tests = set()
+    
+    for pr in connected_prs:
+        node = dag.nodes[pr]
+        task_instance = node.task_instance
+        fail_to_pass = task_instance.get("FAIL_TO_PASS", [])
+        
+        # Check if FAIL_TO_PASS is defined and non-empty
+        # Handle both string (JSON) and list formats
+        if isinstance(fail_to_pass, str):
+            try:
+                import json
+                fail_to_pass = json.loads(fail_to_pass) if fail_to_pass.strip() else []
+            except (json.JSONDecodeError, AttributeError):
+                fail_to_pass = []
+        
+        if fail_to_pass and len(fail_to_pass) > 0:
+            prs_with_tests.append(pr)
+        else:
+            prs_without_tests.add(pr)
+    
+    connected_prs = prs_with_tests
+    prs_filtered = prs_before_filter - len(connected_prs)
+    
+    logger.info(
+        f"Chain sampling: Filtered {prs_filtered} PRs without FAIL_TO_PASS tests "
+        f"({len(connected_prs)}/{prs_before_filter} PRs remaining)"
+    )
+    
+    # Count edges that were connected to filtered PRs
+    edges_filtered = 0
+    for pr in prs_without_tests:
+        # Count incoming edges (edges TO this PR)
+        edges_filtered += len(dag.get_dependent_weights(pr))
+        # Count outgoing edges (edges FROM this PR)
+        edges_filtered += len(dag.get_dependency_weights(pr))
+    
+    logger.info(
+        f"Chain sampling: Removed {edges_filtered} edges connected to filtered PRs"
+    )
+
     if not connected_prs:
         logger.warning("No connected PRs found in DAG - cannot sample chains")
         return []
@@ -818,20 +863,28 @@ def sample_chains_from_dag(
                     break
 
                 dependent_weights = dag.get_dependent_weights(current_pr)
-                if not dependent_weights:
-                    # No more dependents, end chain
+                
+                # Filter out dependents that were removed (no FAIL_TO_PASS tests)
+                valid_dependent_weights = {
+                    dep: weight 
+                    for dep, weight in dependent_weights.items() 
+                    if dep not in prs_without_tests
+                }
+                
+                if not valid_dependent_weights:
+                    # No more valid dependents, end chain
                     break
 
                 if not validate_chains:
                     # No validation - just follow strongest dependent
-                    best_dep = max(dependent_weights, key=dependent_weights.get)
+                    best_dep = max(valid_dependent_weights, key=valid_dependent_weights.get)
                     current_pr = int(best_dep)
                     continue
 
                 # With validation - find a valid dependent
                 # Sort candidates by weight (descending)
                 candidates = sorted(
-                    dependent_weights.items(), key=lambda x: x[1], reverse=True
+                    valid_dependent_weights.items(), key=lambda x: x[1], reverse=True
                 )
 
                 # Try candidates in order of weight
