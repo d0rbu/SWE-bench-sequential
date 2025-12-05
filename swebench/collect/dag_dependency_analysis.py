@@ -152,6 +152,39 @@ class DependencyDAG:
 
         return result
 
+    def get_statistics(self) -> Dict[str, float]:
+        """Calculate and return statistics about the DAG structure."""
+        num_nodes = len(self.nodes)
+        num_edges = sum(len(deps) for deps in self.edges.values())
+        
+        if num_nodes == 0:
+            return {
+                "num_nodes": 0,
+                "num_edges": 0,
+                "avg_in_degree": 0.0,
+                "avg_out_degree": 0.0,
+            }
+        
+        # Calculate in-degree (number of dependencies per PR)
+        in_degrees = {pr: 0 for pr in self.nodes}
+        for deps in self.edges.values():
+            for dep in deps.keys():
+                if dep in in_degrees:
+                    in_degrees[dep] += 1
+        
+        # Calculate out-degree (number of dependents per PR)
+        out_degrees = {pr: len(deps) for pr, deps in self.edges.items()}
+        
+        avg_in_degree = sum(in_degrees.values()) / num_nodes
+        avg_out_degree = sum(out_degrees.values()) / num_nodes
+        
+        return {
+            "num_nodes": num_nodes,
+            "num_edges": num_edges,
+            "avg_in_degree": avg_in_degree,
+            "avg_out_degree": avg_out_degree,
+        }
+
 
 def extract_modified_files_pre(patch_str: str) -> Set[str]:
     """
@@ -821,6 +854,16 @@ def sample_chains_from_dag(
 
     # Get PRs in topological order (dependencies first)
     topo_order = dag.get_topological_order()
+    
+    # Log pre-sampling DAG statistics
+    pre_stats = dag.get_statistics()
+    logger.info(
+        f"Pre-sampling DAG statistics: "
+        f"{pre_stats['num_nodes']} nodes, "
+        f"{pre_stats['num_edges']} edges, "
+        f"avg in-degree: {pre_stats['avg_in_degree']:.2f}, "
+        f"avg out-degree: {pre_stats['avg_out_degree']:.2f}"
+    )
 
     # Filter to PRs with at least one edge (incoming or outgoing)
     # This excludes isolated nodes that can't form chains of min_chain_length >= 2
@@ -868,6 +911,16 @@ def sample_chains_from_dag(
     
     logger.info(
         f"Chain sampling: Removed {edges_removed} edges connected to filtered PRs"
+    )
+    
+    # Log post-sampling DAG statistics
+    post_stats = dag.get_statistics()
+    logger.info(
+        f"Post-sampling DAG statistics: "
+        f"{post_stats['num_nodes']} nodes, "
+        f"{post_stats['num_edges']} edges, "
+        f"avg in-degree: {post_stats['avg_in_degree']:.2f}, "
+        f"avg out-degree: {post_stats['avg_out_degree']:.2f}"
     )
 
     if not connected_prs:
