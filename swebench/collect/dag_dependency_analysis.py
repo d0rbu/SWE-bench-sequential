@@ -15,6 +15,7 @@ This is expected behavior when working with newly created task instances that
 haven't been processed through the full test identification pipeline.
 """
 
+import json
 import logging
 import random
 import tempfile
@@ -115,6 +116,21 @@ class DependencyDAG:
             for dependency, weight in dependencies.items()
             if dependency == pr_number
         }
+
+    def remove_node(self, pr_number: int) -> None:
+        """Remove a PR node and all its associated edges from the DAG."""
+        # Remove the node itself
+        if pr_number in self.nodes:
+            del self.nodes[pr_number]
+        
+        # Remove all edges FROM this PR
+        if pr_number in self.edges:
+            del self.edges[pr_number]
+        
+        # Remove all edges TO this PR (from other PRs)
+        for pr, dependencies in self.edges.items():
+            if pr_number in dependencies:
+                del dependencies[pr_number]
 
     def get_topological_order(self) -> list[int]:
         """Return PRs in topological order (dependencies before dependents)."""
@@ -719,6 +735,44 @@ def sample_chains_from_dag(
         f"Chain sampling: {len(connected_prs)}/{len(topo_order)} PRs have at least one edge"
     )
 
+    # Filter out PRs without FAIL_TO_PASS tests
+    # These PRs cannot be validated properly in the pipeline
+    prs_before_filter = len(connected_prs)
+    prs_without_tests = []
+    edges_before_removal = sum(len(deps) for deps in dag.edges.values())
+    
+    for pr in connected_prs:
+        node = dag.nodes[pr]
+        task_instance = node.task_instance
+        fail_to_pass = task_instance.get("FAIL_TO_PASS", [])
+        
+        # Check if FAIL_TO_PASS is defined and non-empty
+        # Handle both string (JSON) and list formats
+        if isinstance(fail_to_pass, str):
+            fail_to_pass = json.loads(fail_to_pass) if fail_to_pass.strip() else []
+        
+        if not fail_to_pass or len(fail_to_pass) == 0:
+            prs_without_tests.append(pr)
+    
+    # Remove PRs without tests from the DAG
+    for pr in prs_without_tests:
+        dag.remove_node(pr)
+    
+    # Update connected_prs to reflect removal
+    connected_prs = [pr for pr in connected_prs if pr not in prs_without_tests]
+    prs_filtered = prs_before_filter - len(connected_prs)
+    edges_after_removal = sum(len(deps) for deps in dag.edges.values())
+    edges_removed = edges_before_removal - edges_after_removal
+    
+    logger.info(
+        f"Chain sampling: Filtered {prs_filtered} PRs without FAIL_TO_PASS tests "
+        f"({len(connected_prs)}/{prs_before_filter} PRs remaining)"
+    )
+    
+    logger.info(
+        f"Chain sampling: Removed {edges_removed} edges connected to filtered PRs"
+    )
+
     if not connected_prs:
         logger.warning("No connected PRs found in DAG - cannot sample chains")
         return []
@@ -818,6 +872,7 @@ def sample_chains_from_dag(
                     break
 
                 dependent_weights = dag.get_dependent_weights(current_pr)
+                
                 if not dependent_weights:
                     # No more dependents, end chain
                     break
