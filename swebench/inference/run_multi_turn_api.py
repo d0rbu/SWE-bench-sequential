@@ -14,6 +14,7 @@ import logging
 import os
 import traceback
 from argparse import ArgumentParser
+from enum import StrEnum
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,16 @@ from swebench.inference.make_datasets.utils import extract_diff
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 dotenv.load_dotenv()
+
+
+class Provider(StrEnum):
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    TAMUS = "tamus"
+
+
+TAMUS_AI_CHAT_API_ENDPOINT = "https://chat-api.tamu.ai"
+
 
 # Model limits for context window
 MODEL_LIMITS = {
@@ -142,6 +153,17 @@ PATCH_EXAMPLE = """--- a/file.py
 """
 
 
+def get_provider(model_name: str) -> Provider:
+    """Determine the provider based on environment variables and model name."""
+    # TAMUS takes priority if API key is set
+    if os.environ.get("TAMUS_AI_CHAT_API_KEY"):
+        return Provider.TAMUS
+    # Fall back to model name prefix
+    if model_name.startswith("gpt"):
+        return Provider.OPENAI
+    return Provider.ANTHROPIC
+
+
 def calc_cost(model_name: str, input_tokens: int, output_tokens: int) -> float:
     """Calculate the cost of an API call."""
     input_cost = MODEL_COST_PER_INPUT.get(model_name, 0) * input_tokens
@@ -204,9 +226,12 @@ def call_openai(
     temperature: float = 0.2,
     top_p: float = 0.95,
     max_tokens: int = 4096,
+    client: Optional[openai.OpenAI] = None,
 ) -> tuple:
-    """Call OpenAI API with retry logic."""
-    response = openai.chat.completions.create(
+    """Call OpenAI-compatible API with retry logic."""
+    if client is None:
+        client = openai
+    response = client.chat.completions.create(
         model=model_name,
         messages=messages,
         temperature=temperature,
@@ -254,6 +279,7 @@ def run_chain_inference(
     chain: dict,
     model_name: str,
     api_client,
+    provider: Provider,
     temperature: float = 0.2,
     top_p: float = 0.95,
     max_tokens: int = 4096,
@@ -265,6 +291,7 @@ def run_chain_inference(
         chain: Chain dictionary with task_instances
         model_name: Name of the model to use
         api_client: API client (OpenAI client or Anthropic client)
+        provider: The API provider to use
         temperature: Sampling temperature
         top_p: Top-p sampling parameter
         max_tokens: Maximum tokens per response
@@ -280,7 +307,7 @@ def run_chain_inference(
     turn_predictions = []
     total_cost = 0
 
-    is_openai = model_name.startswith("gpt")
+    use_openai_format = provider in (Provider.OPENAI, Provider.TAMUS)
 
     for turn_idx, turn in enumerate(task_instances):
         instance_id = turn["instance_id"]
@@ -293,7 +320,7 @@ def run_chain_inference(
         messages.append({"role": "user", "content": user_message})
 
         try:
-            if is_openai:
+            if use_openai_format:
                 # OpenAI format includes system message in the messages list
                 full_messages = [
                     {"role": "system", "content": SYSTEM_PROMPT}
@@ -304,6 +331,7 @@ def run_chain_inference(
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
+                    client=api_client,
                 )
             else:
                 # Anthropic format uses system parameter separately
@@ -425,14 +453,24 @@ def main(
         return
 
     # Setup API client
-    is_openai = model_name.startswith("gpt")
+    provider = get_provider(model_name)
 
-    if is_openai:
+    if provider == Provider.TAMUS:
+        api_key = os.environ.get("TAMUS_AI_CHAT_API_KEY")
+        if not api_key:
+            raise ValueError("TAMUS_AI_CHAT_API_KEY environment variable not set")
+        api_client = openai.OpenAI(
+            api_key=api_key,
+            base_url=TAMUS_AI_CHAT_API_ENDPOINT,
+        )
+        logger.info(
+            f"Using TAMUS API with key {'*' * (len(api_key) - 5) + api_key[-5:]}"
+        )
+    elif provider == Provider.OPENAI:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
-        openai.api_key = api_key
-        api_client = None  # OpenAI uses module-level client
+        api_client = openai.OpenAI(api_key=api_key)
         logger.info(
             f"Using OpenAI API with key {'*' * (len(api_key) - 5) + api_key[-5:]}"
         )
@@ -458,6 +496,7 @@ def main(
                     chain=chain,
                     model_name=model_name,
                     api_client=api_client,
+                    provider=provider,
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
