@@ -32,6 +32,8 @@ After generating task instances, you can optionally build chains of related task
     * Each chain represents a sequence of dependent PRs that should be solved in order.
     * Dependencies are identified through git blame analysis and issue tracking.
 
+> **Note on Python 3.13 Compatibility**: If you see warnings like "No FAIL_TO_PASS tests defined" during chain validation, this is expected behavior when working with newly created task instances that haven't been processed through the full test identification pipeline. The chain construction will still complete successfully.
+
 ## Directory Overview
 In this section, we briefly describe each of the files in this directory and its usage details.
 

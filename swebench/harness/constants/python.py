@@ -43,6 +43,13 @@ SPECS_SKLEARN.update(
         for k in ["1.3", "1.4", "1.5", "1.6"]
     }
 )
+SPECS_SKLEARN["1.8"] = {
+    "python": "3.10",
+    "packages": "numpy=1.23 scipy=1.11 cython pytest pandas matplotlib setuptools joblib threadpoolctl",
+    "install": "python -m pip install -e .",
+    "pip_packages": ["cython", "setuptools", "numpy", "scipy"],
+    "test_cmd": TEST_PYTEST,
+}
 
 SPECS_FLASK = {
     "2.0": {
@@ -173,6 +180,17 @@ SPECS_DJANGO.update(
             "test_cmd": TEST_DJANGO,
         }
         for k in ["5.0", "5.1", "5.2"]
+    }
+)
+SPECS_DJANGO.update(
+    {
+        k: {
+            "python": "3.12",
+            "packages": "requirements.txt",
+            "install": "python -m pip install -e .",
+            "test_cmd": TEST_DJANGO,
+        }
+        for k in ["6.0", "6.1"]
     }
 )
 SPECS_DJANGO["1.9"]["test_cmd"] = TEST_DJANGO_NO_PARALLEL

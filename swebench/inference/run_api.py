@@ -5,25 +5,27 @@ It sorts instances by length and continually writes the outputs to a specified f
 """
 
 import json
+import logging
 import os
 import time
-import dotenv
 import traceback
+from argparse import ArgumentParser
 from pathlib import Path
-from tqdm.auto import tqdm
+
+import dotenv
 import numpy as np
-import tiktoken
 import openai
-from anthropic import HUMAN_PROMPT, AI_PROMPT, Anthropic
+import tiktoken
+from anthropic import AI_PROMPT, HUMAN_PROMPT, Anthropic
+from datasets import load_dataset, load_from_disk
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_random_exponential,
 )
-from datasets import load_dataset, load_from_disk
+from tqdm.auto import tqdm
+
 from swebench.inference.make_datasets.utils import extract_diff
-from argparse import ArgumentParser
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ MODEL_COST_PER_INPUT = {
     "claude-2": 0.00001102,
     "claude-3-opus-20240229": 0.000015,
     "claude-3-sonnet-20240229": 0.000003,
-    "claude-3-haiku-20240307": 0.00000025,
+    "claude-3-haiku-20240307": 0.000000125,
     "gpt-3.5-turbo-16k-0613": 0.0000015,
     "gpt-3.5-turbo-0613": 0.0000015,
     "gpt-3.5-turbo-1106": 0.000001,
@@ -69,7 +71,7 @@ MODEL_COST_PER_OUTPUT = {
     "claude-2": 0.00003268,
     "claude-3-opus-20240229": 0.000075,
     "claude-3-sonnet-20240229": 0.000015,
-    "claude-3-haiku-20240307": 0.00000125,
+    "claude-3-haiku-20240307": 0.000000625,
     "gpt-3.5-turbo-16k-0613": 0.000002,
     "gpt-3.5-turbo-16k": 0.000002,
     "gpt-3.5-turbo-1106": 0.000002,

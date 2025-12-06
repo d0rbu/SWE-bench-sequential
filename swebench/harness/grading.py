@@ -19,8 +19,8 @@ from swebench.harness.constants import (
     ResolvedStatus,
     TestStatus,
 )
-from swebench.harness.test_spec.test_spec import TestSpec
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
+from swebench.harness.test_spec.test_spec import TestSpec
 
 
 # MARK: Utility functions
@@ -293,3 +293,52 @@ def get_eval_report(
         report_map[instance_id]["tests_status"] = report  # type: ignore
 
     return report_map
+
+
+def compute_chain_metrics(chain_turns: list) -> dict:
+    """
+    Computes metrics for a multi-turn chain based on the evaluation results of each turn.
+
+    Args:
+        chain_turns: List of turn dictionaries, each containing an 'evaluation_result' field
+
+    Returns:
+        Dictionary with metrics including:
+        - total_turns: Number of turns in the chain
+        - resolved_turns: Number of turns that passed
+        - success_rate: Fraction of turns that passed
+        - trajectory_streak: Number of consecutive passes from the start
+        - full_chain_success: Whether all turns passed
+        - turn_results: List of boolean pass/fail status for each turn
+          e.g., [False, True, True, False, False] means turns 1 and 2 passed
+    """
+    total_turns = len(chain_turns)
+    if total_turns == 0:
+        return {"error": "Empty chain"}
+
+    resolved_count = 0
+    trajectory_streak = 0
+    streak_broken = False
+    turn_results = []  # List of pass/fail for each turn
+
+    for turn in chain_turns:
+        result = turn.get("evaluation_result", {})
+
+        is_resolved = result.get("resolved", False)
+        turn_results.append(is_resolved)
+
+        if is_resolved:
+            resolved_count += 1
+            if not streak_broken:
+                trajectory_streak += 1
+        else:
+            streak_broken = True
+
+    return {
+        "total_turns": total_turns,
+        "resolved_turns": resolved_count,
+        "success_rate": round(resolved_count / total_turns, 2),
+        "trajectory_streak": trajectory_streak,
+        "full_chain_success": resolved_count == total_turns,
+        "turn_results": turn_results,
+    }
