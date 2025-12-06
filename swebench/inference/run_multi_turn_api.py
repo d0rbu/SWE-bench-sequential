@@ -236,7 +236,7 @@ def call_openai(
         messages=messages,
         temperature=temperature,
         top_p=top_p,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
     )
 
     input_tokens = response.usage.prompt_tokens
