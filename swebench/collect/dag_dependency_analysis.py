@@ -567,6 +567,7 @@ def validate_and_apply_candidate(
     This performs comprehensive validation by:
     1. Applying test_patch to set up the test environment
     2. Running tests to verify FAIL_TO_PASS tests fail with test_patch applied
+    2.5. Verifying PASS_TO_PASS tests pass with test_patch applied (critical for chains)
     3. Applying the main patch
     4. Running tests to verify FAIL_TO_PASS tests now pass
     5. Verifying PASS_TO_PASS tests still pass (critical for chains)
@@ -580,8 +581,7 @@ def validate_and_apply_candidate(
         timeout: Timeout for test execution in seconds (applied to each test run)
 
     Returns:
-        True if candidate is valid (FAIL_TO_PASS tests transition correctly and 
-        PASS_TO_PASS tests still pass), False otherwise
+        True if candidate is valid (all validation steps pass), False otherwise
     """
     validation_logger = context.validation_logger
     container = context.container
@@ -687,6 +687,35 @@ def validate_and_apply_candidate(
         return False
 
     validation_logger.info(f"All FAIL_TO_PASS tests correctly failed with test_patch applied")
+
+    # STEP 2.5: Verify PASS_TO_PASS tests are passing with test_patch applied
+    # This ensures we don't validate PRs where PASS_TO_PASS tests are already broken
+    pass_to_pass_tests = test_spec.PASS_TO_PASS
+    if pass_to_pass_tests:
+        validation_logger.info(
+            f"Verifying {len(pass_to_pass_tests)} PASS_TO_PASS tests are passing before applying main patch"
+        )
+        
+        pass_to_pass_pre_passed = True
+        for test_case in pass_to_pass_tests:
+            test_status = status_map_pre.get(test_case, "FAILED")
+            if test_status not in ["PASSED", "XFAIL"]:
+                validation_logger.warning(
+                    f"PASS_TO_PASS test {test_case} not passing with test_patch: {test_status}"
+                )
+                pass_to_pass_pre_passed = False
+
+        if not pass_to_pass_pre_passed:
+            validation_logger.warning(
+                f"Candidate {candidate.pr_number} failed validation: "
+                f"some PASS_TO_PASS tests were not passing before applying main patch - "
+                f"this indicates the tests are already broken by previous PRs in the chain"
+            )
+            return False
+
+        validation_logger.info(
+            f"All PASS_TO_PASS tests passing before main patch for candidate {candidate.pr_number}"
+        )
 
     # STEP 3: Apply the main patch
     # Write patch to temporary file and copy to container
